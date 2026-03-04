@@ -1,0 +1,697 @@
+# Azure Foundry AI Provider
+
+`azure-foundry-provider` is a highly specialized, production-grade AI SDK provider designed for Azure AI Foundry and Azure OpenAI-compatible endpoints.
+
+## Principals
+
+### URL-First Determinism
+
+While many providers rely on fragile model-name heuristics to decide how to route requests, this provider is built on a **URL-first routing architecture**. By treating the full Azure endpoint URL (including query parameters) as the absolute source of truth, routing, API versions, and operation modes are handled with mathematical determinism. This eliminates "magic" string matching and makes it the preferred choice for enterprise environments where reliability is non-negotiable.
+
+### Advanced Throttling & The "Governor"
+
+The implementation features a sophisticated quota management system known as the **Governor**. It goes beyond static limits by implementing **adaptive throttling** that parses real-time `x-ratelimit-*` headers directly from Azure responses. This allows the provider to dynamically apply "soft" or "hard" cooldowns, preventing 429 failures before they occur. Combined with jittered exponential backoff and abort-aware request queueing, the Governor ensures robust performance even under high-concurrency workloads.
+
+### Intelligent Error Recovery
+
+A standout feature of the provider is its **Chat-to-Responses fallback**. Azure's model-operation compatibility can vary; if a request is routed to a Chat endpoint but the model rejects the operation, the provider intelligently detects the specific error payload and automatically retries through the Responses transport. This recovery is carefully balanced to respect explicit developer intent, remaining disabled when a specific mode is strictly forced.
+
+### Engineered for Reliability
+
+The codebase adheres to the highest standards of modern TypeScript development, utilizing strict compiler configurations to eliminate boundary errors between the Azure API and your application. The architecture is highly modular, with specialized components for request sanitization and error analysis, and is backed by a comprehensive test suite (>90% coverage) that utilizes deterministic time-injection to verify complex throttling logic.
+
+## Highlights
+
+- URL-first routing from copied Azure endpoint URLs (no model-name endpoint heuristics)
+- Supports both chat and responses operation paths
+- Supports Azure v1 operation paths and `/openai/v1` base root with mode-driven routing
+- Chat transport uses OpenAI-compatible semantics (system role remains `system`, `max_tokens` is used)
+- Request policy control for tools (`auto`, `off`, `on`)
+- Built-in retries and 429 handling with exponential backoff + jitter
+- Optional static quota controls (`rpm`, `tpm`, `maxConcurrent`, `maxOutputTokensCap`)
+- Adaptive throttling from Azure `x-ratelimit-*` headers
+- Request sanitization for chat history compatibility (removes assistant `reasoning_content`/`reasoning` fields)
+- Automatic chat->responses fallback for model/operation mismatch errors (when mode is not explicitly forced to chat)
+- Timeout support via `AbortSignal`
+
+## Supported endpoint patterns
+
+Accepted hostnames:
+
+- `*.services.ai.azure.com`
+- `*.cognitiveservices.azure.com`
+- `*.openai.azure.com`
+
+Accepted operation suffixes:
+
+- `/models/chat/completions`
+- `/chat/completions`
+- `/responses`
+- `/openai/v1/chat/completions`
+- `/openai/v1/responses`
+- `/openai/v1` (base root, requires `apiMode` configuration)
+
+Examples:
+
+- `https://<id>.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview`
+- `https://<res>.cognitiveservices.azure.com/openai/chat/completions?api-version=preview`
+- `https://<res>.cognitiveservices.azure.com/openai/responses?api-version=preview`
+- `https://<res>.openai.azure.com/openai/chat/completions?api-version=2024-05-01-preview`
+- `https://<res>.openai.azure.com/openai/v1/chat/completions`
+- `https://<res>.services.ai.azure.com/openai/v1/responses`
+- `https://<res>.cognitiveservices.azure.com/openai/v1`
+
+Note on `api-version`:
+
+- `/models/chat/completions` requires `api-version`.
+- `/openai/v1/*` endpoints do not require `api-version`.
+- `/openai/v1` base endpoint requires effective `apiMode` (global `apiMode` or per-model `modelOptions[modelId].apiMode`).
+
+## Quick start (TypeScript)
+
+```ts
+import { createAzureFoundryProvider } from "azure-foundry-provider"
+
+const provider = createAzureFoundryProvider({
+  endpoint:
+    "https://my-resource.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview",
+  apiKey: process.env.AZURE_API_KEY,
+})
+
+const model = provider.languageModel("DeepSeek-V3.1")
+```
+
+## OpenCode/Kilo integration example
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/bun/providers/azure-foundry-provider/src/index.ts",
+      "models": {
+        "deepseek-v3.1": {
+          "id": "DeepSeek-V3.1",
+          "name": "DeepSeek V3.1",
+          "tool_call": false,
+          "reasoning": false,
+          "limit": { "context": 64000, "output": 1024 },
+          "modalities": { "input": ["text"], "output": ["text"] }
+        }
+      },
+      "options": {
+        "endpoint": "https://<id>.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview",
+        "apiKey": "{env:AZURE_API_KEY}",
+        "timeout": 90000,
+        "quota": {
+          "adaptive": {
+            "enabled": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+## API
+
+### `createAzureFoundryProvider(options?)`
+
+Creates a provider that implements AI SDK `ProviderV2` plus convenience methods:
+
+- `provider(modelId)`
+- `provider.languageModel(modelId)`
+- `provider.chat(modelId)`
+- `provider.responses(modelId)`
+
+Unsupported model families intentionally throw `NoSuchModelError`:
+
+- `provider.textEmbeddingModel(modelId)`
+- `provider.imageModel(modelId)`
+
+### Options reference
+
+```ts
+type AzureFoundryOptions = {
+  endpoint?: string
+  apiKey?: string
+  headers?: Record<string, string>
+  apiMode?: "chat" | "responses"
+  toolPolicy?: "auto" | "off" | "on"
+  timeout?: number | false
+  quota?: QuotaOptions
+  assistantReasoningSanitization?: "auto" | "always" | "never"
+  modelOptions?: Record<
+    string,
+    {
+      apiMode?: "chat" | "responses"
+      assistantReasoningSanitization?: "auto" | "always" | "never"
+    }
+  >
+  fetch?: FetchFunction
+  name?: string
+}
+```
+
+- `endpoint`:
+  - Full URL to Azure endpoint.
+  - If omitted, loads from `AZURE_FOUNDRY_ENDPOINT`.
+  - Must use `https://`.
+  - `/models/chat/completions` requires `api-version` query.
+- `apiKey`:
+  - API key value.
+  - If omitted, loads from `AZURE_API_KEY`.
+- `headers`:
+  - Extra headers to include on every request.
+  - If `Authorization` or `api-key` is present, provider does not inject `api-key` automatically.
+- `apiMode`:
+  - Optional override: `"chat"` or `"responses"`.
+  - If omitted, mode is inferred from URL path.
+  - Override rewrites only operation suffix while preserving origin, path prefix, and query params.
+- `toolPolicy` (default `"auto"`):
+  - `"auto"`: pass-through.
+  - `"off"`: strips tools and enforces `toolChoice: { type: "none" }`.
+  - `"on"`: if tools exist and tool choice is not fixed, forces `toolChoice: { type: "required" }`.
+- `timeout`:
+  - `number`: request timeout in milliseconds.
+  - `false`: explicitly disables timeout.
+  - `undefined`: no timeout wrapper.
+- `quota`:
+  - Static quota limits + retry + adaptive throttling options.
+- `assistantReasoningSanitization` (default `"auto"`):
+  - Global policy for assistant reasoning field sanitization.
+  - `"always"`: sanitize before first request.
+  - `"auto"`: send raw first, sanitize only when endpoint rejects reasoning fields.
+  - `"never"`: never sanitize.
+- `modelOptions`:
+  - Model-specific overrides for provider behavior.
+  - Supports per-model `apiMode` and `assistantReasoningSanitization`.
+- `fetch`:
+  - Custom fetch implementation.
+- `name` (default `"azure-foundry"`):
+  - Provider id prefix in `model.provider` (for diagnostics).
+
+## Mode behavior
+
+### Inference
+
+- `/chat/completions` or `/models/chat/completions` -> `chat`
+- `/responses` -> `responses`
+
+### Override behavior (`apiMode`)
+
+If the URL path and `apiMode` differ, the provider rewrites the operation suffix and keeps:
+
+- hostname/origin
+- any path prefix before operation suffix
+- all query parameters in original order
+
+Per-model mode override is also supported via `modelOptions[modelId].apiMode` and takes precedence over global `apiMode`.
+
+### Operation mismatch fallback
+
+When a request is routed to chat and Azure returns a model/operation mismatch error like:
+
+- `The chatCompletion operation does not work with the specified model ...`
+
+the provider can retry once through responses transport for the same model. This behavior is enabled only when chat mode is not explicitly forced:
+
+- fallback allowed: inferred mode or non-chat global/per-model mode context
+- fallback disabled: explicit global `apiMode: "chat"` or per-model `apiMode: "chat"`
+
+This keeps strict explicit chat configurations deterministic while improving resilience for mixed model setups.
+
+## Auth behavior
+
+Priority:
+
+1. Use `headers.Authorization` or `headers["api-key"]` if explicitly provided.
+2. Else inject `api-key` from `apiKey` option.
+3. Else inject `api-key` from `AZURE_API_KEY`.
+
+`User-Agent` suffix is automatically appended as `azure-foundry-provider/<version>`.
+
+## Chat compatibility behavior
+
+For chat requests, provider applies compatibility safeguards:
+
+- Preserves `system` role (no remap to `developer`)
+- Uses `max_tokens` for output budget
+
+Assistant reasoning field sanitization is configurable:
+
+- Global: `assistantReasoningSanitization`
+- Per model: `modelOptions[modelId].assistantReasoningSanitization`
+- Effective policy precedence:
+  1. per-model override
+  2. global policy
+  3. default `auto`
+
+When sanitization is active, the provider removes assistant fields that break strict endpoints:
+
+- `reasoning_content`
+- `reasoning`
+
+In `auto` mode, provider retries once with sanitized assistant fields after `400` schema-like rejections for reasoning fields and then remembers this path for that model in-process.
+
+### Why this exists
+
+Some orchestration stacks include prior assistant thinking in conversation history using fields such as `reasoning_content` (or similar metadata). Several Azure Foundry chat endpoints reject those assistant fields as unknown/forbidden input. When that happens, requests fail even though the rest of the payload is valid.
+
+### Why keeping assistant thinking can be useful
+
+When an endpoint supports assistant reasoning fields, preserving them can improve multi-turn behavior:
+
+- Better continuity across long tasks: the model can reuse its prior intermediate plan instead of rebuilding context from scratch.
+- More stable tool workflows: follow-up calls can align with earlier tool-selection rationale, reducing unnecessary tool churn.
+- Fewer repeated clarifications: prior reasoning state can help the model avoid re-asking already resolved constraints.
+- Better long-horizon decomposition: complex tasks that span many turns often benefit when the model can reference previous internal decomposition.
+
+Trade-off: compatibility varies by endpoint/model. Strict validators (notably some Mistral Foundry chat paths) reject `reasoning_content`/`reasoning`, so pass-through is not universally safe.
+
+Practical recommendation:
+
+- Use global `assistantReasoningSanitization: "auto"`.
+- Set strict models to `"always"` via `modelOptions`.
+- Use `"never"` only when you know the endpoint accepts reasoning fields and you explicitly want pass-through behavior.
+
+Typical failure pattern on strict models/endpoints (for example Mistral via strict Foundry chat validation):
+
+- HTTP `400 Bad Request`
+- validation details mention forbidden extra fields
+- error details reference assistant reasoning fields in message history, for example:
+  - `type: "extra_forbidden"`
+  - location like `messages[*].assistant.reasoning_content`
+
+Concrete example observed:
+
+```json
+{
+  "detail": [
+    {
+      "type": "extra_forbidden",
+      "loc": ["body", "messages", 2, "assistant", "reasoning_content"],
+      "msg": "Extra inputs are not permitted"
+    },
+    {
+      "type": "extra_forbidden",
+      "loc": ["body", "messages", 4, "assistant", "reasoning_content"],
+      "msg": "Extra inputs are not permitted"
+    }
+  ]
+}
+```
+
+If you observe this class of error, set model-specific sanitization to `always` for that model to skip the first failing roundtrip and improve latency.
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  assistantReasoningSanitization: "auto",
+  modelOptions: {
+    "Mistral-Large-3": {
+      assistantReasoningSanitization: "always",
+    },
+  },
+})
+```
+
+Policy guidance:
+
+- `auto`: best default when model behavior is mixed/unknown.
+- `always`: best for models you know reject assistant reasoning fields (avoids one failed HTTP 400 attempt).
+- `never`: only use when endpoint explicitly supports these fields and you require exact pass-through.
+
+## Quota and throttling
+
+### Types
+
+```ts
+type QuotaRule = {
+  rpm?: number
+  tpm?: number
+  maxConcurrent?: number
+  maxOutputTokensCap?: number
+}
+
+type QuotaRetryOptions = {
+  maxAttempts?: number
+  baseDelayMs?: number
+  maxDelayMs?: number
+  jitterRatio?: number
+  honorRetryAfter?: boolean
+  cooldownOn429Ms?: number
+}
+
+type QuotaAdaptiveOptions = {
+  enabled?: boolean
+  minCooldownMs?: number
+  lowWatermarkRatio?: number
+  lowCooldownMs?: number
+}
+
+type QuotaOptions = {
+  default?: QuotaRule
+  models?: Record<string, QuotaRule>
+  retry?: QuotaRetryOptions
+  adaptive?: QuotaAdaptiveOptions
+}
+```
+
+### Built-in defaults
+
+Retry defaults (used unless overridden):
+
+- `maxAttempts: 4`
+- `baseDelayMs: 1200`
+- `maxDelayMs: 30000`
+- `jitterRatio: 0.25`
+- `honorRetryAfter: true`
+- `cooldownOn429Ms: 10000`
+
+Adaptive defaults (used unless overridden):
+
+- `enabled: true`
+- `minCooldownMs: 1000`
+- `lowWatermarkRatio: 0.1`
+- `lowCooldownMs: 250`
+
+Static limits (`default` and `models`) are opt-in only.
+
+### What the governor does
+
+- Queues requests when any configured limit would be exceeded.
+- Supports per-model overrides by model id string in request body.
+- Applies output token clamping via `maxOutputTokensCap`.
+- Retries retryable statuses (`429`, `408`, `500`, `502`, `503`, `504`) with bounded backoff.
+- Honors `Retry-After` on `429` when enabled.
+- Uses adaptive cooldown from headers when near/at budget floor:
+  - `x-ratelimit-limit-requests`
+  - `x-ratelimit-limit-tokens`
+  - `x-ratelimit-remaining-requests`
+  - `x-ratelimit-remaining-tokens`
+- Waits are abort-aware; canceled requests do not stay queued indefinitely.
+
+## Examples
+
+### 1) Minimal (adaptive-only)
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint:
+    "https://ais123.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview",
+  apiKey: process.env.AZURE_API_KEY,
+  quota: {
+    adaptive: { enabled: true },
+  },
+})
+```
+
+### 2) Fully static quota controls
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint:
+    "https://ais123.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview",
+  apiKey: process.env.AZURE_API_KEY,
+  timeout: 90_000,
+  quota: {
+    default: {
+      rpm: 6,
+      tpm: 20_000,
+      maxConcurrent: 1,
+      maxOutputTokensCap: 1024,
+    },
+    models: {
+      "Kimi-K2.5": {
+        rpm: 3,
+        tpm: 12_000,
+        maxConcurrent: 1,
+        maxOutputTokensCap: 768,
+      },
+      "Kimi-K2-Thinking": {
+        rpm: 2,
+        tpm: 8_000,
+        maxConcurrent: 1,
+        maxOutputTokensCap: 640,
+      },
+      "Mistral-Large-3": {
+        rpm: 4,
+        tpm: 16_000,
+        maxConcurrent: 1,
+        maxOutputTokensCap: 1024,
+      },
+    },
+  },
+})
+```
+
+### 3) Retry tuning
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  quota: {
+    retry: {
+      maxAttempts: 5,
+      baseDelayMs: 800,
+      maxDelayMs: 20_000,
+      jitterRatio: 0.2,
+      honorRetryAfter: true,
+      cooldownOn429Ms: 5000,
+    },
+  },
+})
+```
+
+### 4) Adaptive tuning from Azure response headers
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  quota: {
+    adaptive: {
+      enabled: true,
+      minCooldownMs: 1000,
+      lowWatermarkRatio: 0.1,
+      lowCooldownMs: 250,
+    },
+  },
+})
+```
+
+### 5) Disable adaptive throttling
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  quota: {
+    adaptive: { enabled: false },
+  },
+})
+```
+
+### 6) Force responses mode on a chat URL
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: "https://myres.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+  apiMode: "responses",
+  apiKey: process.env.AZURE_API_KEY,
+})
+
+const model = provider.languageModel("gpt-4.1")
+```
+
+### 7) Disable tool calls regardless of prompt/tool list
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  toolPolicy: "off",
+})
+```
+
+### 8) Require tool calls when tools are present
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  toolPolicy: "on",
+})
+```
+
+### 9) Use bearer token instead of API key header
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  headers: {
+    Authorization: `Bearer ${process.env.AZURE_ACCESS_TOKEN}`,
+  },
+})
+```
+
+### 10) Custom timeout behavior
+
+```ts
+// 45s timeout
+const providerA = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  timeout: 45_000,
+})
+
+// explicitly disable timeout wrapper
+const providerB = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  timeout: false,
+})
+```
+
+### 11) Custom fetch for instrumentation
+
+```ts
+const tracedFetch: typeof fetch = Object.assign(
+  async (input: RequestInfo | URL, init?: RequestInit) => {
+    const start = Date.now()
+    const response = await fetch(input, init)
+    const ms = Date.now() - start
+    console.log("Azure call", response.status, `${ms}ms`)
+    return response
+  },
+  { preconnect: fetch.preconnect },
+)
+
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  fetch: tracedFetch,
+})
+```
+
+### 12) Validate/inspect endpoint parsing
+
+```ts
+import { parseEndpoint } from "azure-foundry-provider"
+
+const parsed = parseEndpoint(
+  "https://foo.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview&x=1",
+)
+
+console.log(parsed.mode) // chat
+console.log(parsed.requestURL)
+```
+
+### 13) Global assistant reasoning sanitization policy
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  assistantReasoningSanitization: "auto",
+})
+```
+
+### 14) Per-model override under provider options
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  apiMode: "chat",
+  assistantReasoningSanitization: "auto",
+  modelOptions: {
+    "DeepSeek-V3.1": {
+      apiMode: "responses",
+    },
+    "Mistral-Large-3": {
+      assistantReasoningSanitization: "always",
+    },
+  },
+})
+```
+
+### 15) v1 base endpoint with mixed per-model protocol overrides
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: "https://YOUR-RESOURCE.cognitiveservices.azure.com/openai/v1",
+  apiKey: process.env.AZURE_API_KEY,
+  apiMode: "chat",
+  modelOptions: {
+    "gpt-5.3-codex": {
+      apiMode: "responses",
+    },
+    "Kimi-K2.5": {
+      apiMode: "responses",
+    },
+  },
+})
+```
+
+This pattern is useful when a provider points to a single v1 base root but individual models must use different operations.
+
+## Environment variables
+
+- `AZURE_FOUNDRY_ENDPOINT`: fallback for `options.endpoint`
+- `AZURE_API_KEY`: fallback for `options.apiKey`
+
+## Troubleshooting
+
+### Identifying Operation Mismatches
+
+If you see an error like `The chatCompletion operation does not work with the specified model`, it means the model you've deployed doesn't support the standard chat endpoint.
+
+- **Fix:** Either update your `endpoint` to a `/responses` path or set `modelOptions[modelId].apiMode = "responses"`.
+- **Note:** The provider includes an automatic fallback for this error, but explicit configuration is always preferred for latency optimization.
+
+### Dealing with `400 Bad Request` and `reasoning_content`
+
+Some strict Azure Foundry endpoints (notably Mistral-based ones) reject assistant messages that contain `reasoning_content` or `reasoning` fields in their history.
+
+- **Symptom:** You receive an `extra_forbidden` validation error.
+- **Fix:** Use `assistantReasoningSanitization: "auto"` (default) or set it to `"always"` for that specific model in `modelOptions` to skip the failing round-trip.
+
+### Rate Limits and 429 Errors
+
+The provider handles `429` errors automatically via retries and adaptive throttling.
+
+- **If you are still hitting limits:** Check your `rpm` and `tpm` settings in the `quota` block.
+- **Adaptive Throttling:** Ensure `quota.adaptive.enabled` is `true` (default) to allow the provider to react to Azure's ratelimit headers before a failure occurs.
+
+### common Errors Reference
+
+- **`Unsupported Azure hostname`**: Ensure your host matches `*.services.ai.azure.com`, `*.cognitiveservices.azure.com`, or `*.openai.azure.com`.
+- **`Unsupported endpoint path`**: Path must end with `/chat/completions`, `/responses`, `/models/chat/completions`, or a supported `/openai/v1` variant.
+- **`Missing required api-version`**: Add `?api-version=...` to your Foundry URL if using `/models/chat/completions`.
+- **`Endpoint path /openai/v1 requires apiMode`**: When using the base v1 root, you must explicitly set `apiMode` globally or per-model.
+- **`content_filter` / `ResponsibleAIPolicyViolation`**: This is Azure's content policy, not a transport error. Adjust the prompt and retry.
+
+## Operational notes
+
+- Query parameters are preserved as provided in the endpoint URL.
+- Chat and responses requests route deterministically from endpoint parsing + `apiMode` override.
+- Retry/backoff is active even if you do not configure static quota limits.
+- Adaptive throttling is enabled by default and uses Azure ratelimit headers when available.
+
+## Exports
+
+- `createAzureFoundryProvider`
+- `azureFoundryProvider` (default instance with environment-based settings)
+- `parseEndpoint`
+- Types:
+  - `AzureFoundryOptions`
+  - `AzureFoundryProvider`
+  - `ApiMode`, `HostType`, `PathType`, `ParsedEndpoint`
+  - `ToolPolicy`
+  - `QuotaOptions`, `QuotaRule`, `QuotaRetryOptions`, `QuotaAdaptiveOptions`
+  - `AssistantReasoningSanitizationPolicy`, `ModelRequestOptions`, `RequestPolicyOptions`

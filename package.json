@@ -8,14 +8,14 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "bunx tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "lint": "bunx eslint .",
-    "lint:fix": "bunx eslint . --fix",
-    "lint:staged": "bunx eslint --fix",
-    "format": "bunx prettier --write .",
-    "format:check": "bunx prettier --check .",
-    "format:staged": "bunx prettier --write"
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "lint:staged": "eslint --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "format:staged": "prettier --write"
   },
   "dependencies": {
     "@ai-sdk/openai": "2.0.91",

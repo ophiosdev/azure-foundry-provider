@@ -1,0 +1,50 @@
+[env]
+_.file = "{{config_root}}/.env"
+_.path = ['{{config_root}}/node_modules/.bin']
+NODE_PACKAGE_MANAGER="bun"
+
+[tools]
+actionlint = "latest"
+bun = "latest"
+gitleaks = "latest"
+markdownlint-cli2 = "latest"
+prek = "latest"
+trufflehog = "latest"
+typos = "latest"
+
+[hooks]
+enter = ["mise run install-packages"]
+
+[tasks.install-packages]
+description = "Install node dependencies when package.json changed"
+alias = "ip"
+silent = "stderr"
+sources = ["package.json"]
+outputs = ["node_modules/.package.json"]
+run = '''
+if [ -f package.json ] && [ -z "${NODE_NO_INSTALL_PACKAGES:-}" ]; then
+  if [ ! -d node_modules ] || [ ! -f node_modules/.package.json ] || [ node_modules/.package.json -ot package.json ]; then
+    if [ -z "${NODE_PACKAGE_MANAGER:-}" ]; then
+      if [ -f yarn.lock ]; then
+        echo "Installing dependencies using yarn..."
+        yarn install
+      elif [ -f package-lock.json ]; then
+        echo "Installing dependencies using npm..."
+        npm install
+      else
+        echo "No supported lock file found. Installing dependencies using yarn..."
+        yarn install
+      fi
+    else
+      echo "Installing dependencies with ${NODE_PACKAGE_MANAGER}..."
+      ${NODE_PACKAGE_MANAGER} install
+    fi
+    mkdir -p node_modules
+    touch node_modules/.package.json
+  fi
+fi
+'''
+
+[[watch_files]]
+patterns = ["package.json"]
+run = "mise run install-packages"

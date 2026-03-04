@@ -1,0 +1,12 @@
+node_modules
+dist
+out
+coverage
+.cache
+.eslintcache
+*.tsbuildinfo
+bun.lock
+*.tgz
+logs
+*.log*
+.env*

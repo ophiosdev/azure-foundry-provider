@@ -1,0 +1,32 @@
+# For more information on how to configure typos, see:
+# - https://github.com/crate-ci/typos/blob/master/docs/reference.md
+# - https://github.com/crate-ci/typos/blob/master/README.md#false-positives
+
+[files]
+# By default, typos will not check files that are ignored by git.
+# You can override this behavior here.
+# For example, to check all files, you would set:
+# ignore-vcs = false
+extend-exclude = [
+  "**/.mise.toml",
+]
+
+[default]
+# This section contains the default configuration for all file types.
+# You can override these settings for specific file types below.
+
+# A list of words that should be considered correct.
+# This is useful for words that are specific to your project.
+# For example:
+# extend-words = {
+#   "myawesomeword" = "myawesomeword",
+#   "another" = "another",
+# }
+
+# A list of regular expressions that should be ignored.
+# This is useful for things like URLs, or other patterns that
+# are not words.
+# For example, to ignore all URLs:
+# extend-ignore-re = [
+#   "https?://[^`\\s]+",
+# ]

@@ -1,0 +1,95 @@
+---
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+default_stages:
+  - pre-commit
+fail_fast: true
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: fix-byte-order-marker
+      - id: check-case-conflict
+      - id: check-json
+        exclude: bun\.lock
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.21.0
+    hooks:
+      - id: markdownlint-cli2
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.11
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.44.0
+    hooks:
+      - id: typos
+
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier-format
+        entry: bun run format:staged
+        language: system
+        types_or:
+          - javascript
+          - ts
+          - json
+          - yaml
+          - markdown
+          - css
+          - scss
+          - html
+
+      - id: eslint
+        name: eslint-fix
+        entry: bun run lint:staged
+        language: system
+        types_or:
+          - javascript
+          - ts
+
+      - id: typecheck
+        name: typecheck
+        entry: bun run typecheck
+        language: system
+        pass_filenames: false
+        stages:
+          - pre-push
+
+      - id: test
+        name: test
+        entry: bun test
+        language: system
+        pass_filenames: false
+        stages:
+          - pre-push
+
+  # Gitleaks for fast staged secret scanning
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  # Trufflehog for comprehensive secret detection
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.93.7
+    hooks:
+      - id: trufflehog
+        stages:
+          - pre-push

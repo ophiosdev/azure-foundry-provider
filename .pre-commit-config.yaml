@@ -33,7 +33,7 @@ repos:
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.11
     hooks:
-      - id: actionlint
+      - id: actionlint-system
 
   - repo: https://github.com/crate-ci/typos
     rev: v1.44.0
@@ -80,16 +80,21 @@ repos:
         stages:
           - pre-push
 
-  # Gitleaks for fast staged secret scanning
-  - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.30.0
-    hooks:
-      - id: gitleaks
+      # Gitleaks for fast staged secret scanning
+      - id: gitleaks-system
+        name: Detect hardcoded secrets
+        description: Detect hardcoded secrets using Gitleaks
+        entry: gitleaks git --pre-commit --redact --staged --verbose
+        language: system
+        pass_filenames: false
 
-  # Trufflehog for comprehensive secret detection
-  - repo: https://github.com/trufflesecurity/trufflehog
-    rev: v3.93.7
-    hooks:
+      # Trufflehog for comprehensive secret detection
+      # currently using local hook because trufflehog does not provide a system hook
       - id: trufflehog
+        name: TruffleHog
+        description: Detect secrets in your data with TruffleHog.
+        entry: trufflehog git file://. --since-commit HEAD --results=verified --fail --trust-local-git-config
+        language: system
+        pass_filenames: false
         stages:
           - pre-push

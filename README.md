@@ -521,6 +521,85 @@ Static limits (`default` and `models`) are opt-in only.
   - `x-ratelimit-remaining-tokens`
 - Waits are abort-aware; canceled requests do not stay queued indefinitely.
 
+### Head-index queue pruning
+
+The governor maintains sliding windows for request-rate and token-rate accounting. These windows are pruned frequently, so their data structure matters for both throughput and latency.
+
+#### Why this exists
+
+In a naive FIFO queue, pruning old entries with `shift()` repeatedly can become expensive because each `shift()` reindexes the remaining array. Under sustained load, this adds avoidable CPU overhead in a hot path.
+
+To avoid that, the provider uses head-index pruning:
+
+- events are appended to arrays (`requests`, `tokens`)
+- pruning advances a head pointer (`requestHead`, `tokenHead`) instead of shifting array elements
+- active window length is computed from `array.length - head`
+- periodic compaction trims consumed prefixes when head growth crosses thresholds
+
+This keeps pruning cost proportional to the number of expired entries without repeated reindexing work.
+
+#### How it works in this provider
+
+For each model window, the governor tracks:
+
+- `requests`: request timestamps for RPM checks
+- `requestHead`: start index of currently active request timestamps
+- `tokens`: `{ at, tokens }` events for TPM checks
+- `tokenHead`: start index of currently active token events
+
+At each acquire loop:
+
+1. Calculate the minimum active timestamp (`now - windowMs`).
+2. Advance `requestHead` while old request timestamps are out of window.
+3. Advance `tokenHead` while old token events are out of window.
+4. Evaluate waits (`maxConcurrent`, RPM, TPM) against active slices.
+5. Append current event on successful admission.
+
+Compaction policy:
+
+- when head index grows large relative to array size, the window compacts the live slice and resets head to `0`
+- this avoids unbounded stale prefix growth while preserving simple, predictable behavior
+
+#### Operational impact
+
+- Lower CPU churn in prune-heavy workloads.
+- Better tail latency stability when many requests age out in bursts.
+- No change to external quota semantics; this is an internal queue-maintenance optimization.
+
+#### Conceptual example
+
+```ts
+type TokenEvent = { at: number; tokens: number }
+
+let requests: number[] = []
+let requestHead = 0
+
+let tokens: TokenEvent[] = []
+let tokenHead = 0
+
+function prune(now: number, windowMs: number) {
+  const min = now - windowMs
+
+  while (requestHead < requests.length && requests[requestHead]! < min) {
+    requestHead += 1
+  }
+
+  while (tokenHead < tokens.length && tokens[tokenHead]!.at < min) {
+    tokenHead += 1
+  }
+}
+
+function activeRequests() {
+  return requests.slice(requestHead)
+}
+
+function activeTokens() {
+  return tokens.slice(tokenHead)
+}
+```
+
+The real implementation also adds bounded compaction and integrates these active windows directly into RPM/TPM wait calculations.
+
 ## Examples
 
 ### 1) Minimal (adaptive-only)

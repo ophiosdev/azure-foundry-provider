@@ -97,7 +97,9 @@ type TokenEvent = {
 type WindowState = {
   active: number
   requests: number[]
+  requestHead: number
   tokens: TokenEvent[]
+  tokenHead: number
   lastSeen: number
 }
 
@@ -163,6 +165,17 @@ function waitMs(delay: number, signal?: AbortSignal | null): Promise<void> {
 
     signal?.addEventListener("abort", onAbort, { once: true })
   })
+}
+
+function visibleLength(items: { length: number }, head: number): number {
+  return Math.max(0, items.length - head)
+}
+
+function maybeCompact<T>(items: T[], head: number): { items: T[]; head: number } {
+  if (head <= 1024 || head * 2 < items.length) {
+    return { items, head }
+  }
+  return { items: items.slice(head), head: 0 }
 }
 
 function mergeRule(base: QuotaRule | undefined, override: QuotaRule | undefined): QuotaRule {
@@ -243,7 +256,9 @@ class QuotaGovernor {
     const created: WindowState = {
       active: 0,
       requests: [],
+      requestHead: 0,
       tokens: [],
+      tokenHead: 0,
       lastSeen: now,
     }
     this.windows.set(modelId, created)
@@ -256,7 +271,10 @@ class QuotaGovernor {
 
     for (const [modelId, window] of this.windows.entries()) {
       this.prune(window, now)
-      const idle = window.active === 0 && window.requests.length === 0 && window.tokens.length === 0
+      const idle =
+        window.active === 0 &&
+        visibleLength(window.requests, window.requestHead) === 0 &&
+        visibleLength(window.tokens, window.tokenHead) === 0
       if (!idle) continue
       if (now - window.lastSeen <= this.runtime.windowMs) continue
       this.windows.delete(modelId)
@@ -269,19 +287,43 @@ class QuotaGovernor {
 
   private prune(window: WindowState, now: number): void {
     const min = now - this.runtime.windowMs
-    while (
-      window.requests.length > 0 &&
-      window.requests[0] !== undefined &&
-      window.requests[0] < min
-    ) {
-      window.requests.shift()
+    while (window.requestHead < window.requests.length) {
+      const value = window.requests[window.requestHead]
+      if (value === undefined || value >= min) break
+      window.requestHead += 1
     }
-    while (
-      window.tokens.length > 0 &&
-      window.tokens[0] !== undefined &&
-      window.tokens[0].at < min
-    ) {
-      window.tokens.shift()
+    while (window.tokenHead < window.tokens.length) {
+      const value = window.tokens[window.tokenHead]
+      if (value === undefined || value.at >= min) break
+      window.tokenHead += 1
+    }
+
+    const compactRequests = maybeCompact(window.requests, window.requestHead)
+    window.requests = compactRequests.items
+    window.requestHead = compactRequests.head
+
+    const compactTokens = maybeCompact(window.tokens, window.tokenHead)
+    window.tokens = compactTokens.items
+    window.tokenHead = compactTokens.head
+  }
+
+  private activeRequests(window: WindowState): number[] {
+    return window.requestHead === 0 ? window.requests : window.requests.slice(window.requestHead)
+  }
+
+  private activeTokens(window: WindowState): TokenEvent[] {
+    return window.tokenHead === 0 ? window.tokens : window.tokens.slice(window.tokenHead)
+  }
+
+  debugWindowState(
+    modelId: string,
+  ): { requestsLength: number; tokensLength: number; active: number } | undefined {
+    const window = this.windows.get(modelId)
+    if (!window) return undefined
+    return {
+      requestsLength: visibleLength(window.requests, window.requestHead),
+      tokensLength: visibleLength(window.tokens, window.tokenHead),
+      active: window.active,
     }
   }
 
@@ -332,13 +374,16 @@ class QuotaGovernor {
       }
 
       if (rpm !== undefined) {
-        waitFor = Math.max(waitFor, getRpmWaitMs(this.runtime.windowMs, window.requests, now, rpm))
+        waitFor = Math.max(
+          waitFor,
+          getRpmWaitMs(this.runtime.windowMs, this.activeRequests(window), now, rpm),
+        )
       }
 
       if (enforceTpm && tpm !== undefined) {
         waitFor = Math.max(
           waitFor,
-          getTpmWaitMs(this.runtime.windowMs, window.tokens, now, tpm, estimatedTokens),
+          getTpmWaitMs(this.runtime.windowMs, this.activeTokens(window), now, tpm, estimatedTokens),
         )
       }
 
@@ -644,4 +689,6 @@ export const __test = {
       wait: runtime?.wait ?? waitMs,
       windowMs: runtime?.windowMs ?? WINDOW_MS,
     }),
+  debugWindowState: (governor: QuotaGovernor, modelId: string) =>
+    governor.debugWindowState(modelId),
 }

@@ -48,6 +48,38 @@ export type RequestPolicyOptions = {
   quota?: QuotaOptions
   assistantReasoningSanitization?: AssistantReasoningSanitizationPolicy
   modelOptions?: Record<string, ModelRequestOptions>
+  onRetry?: (event: RetryEvent) => void
+  onAdaptiveCooldown?: (event: AdaptiveCooldownEvent) => void
+  onSanitizedRetry?: (event: SanitizedRetryEvent) => void
+}
+
+export type RetryEvent = {
+  eventVersion: "v1"
+  phase: "retry"
+  attempt: number
+  reason: string
+  status?: number
+  retryAfterMs?: number
+  modelId?: string
+}
+
+export type AdaptiveCooldownEvent = {
+  eventVersion: "v1"
+  phase: "adaptive_cooldown"
+  cooldownMs: number
+  reason: string
+  remainingRequests?: number
+  remainingTokens?: number
+  modelId?: string
+}
+
+export type SanitizedRetryEvent = {
+  eventVersion: "v1"
+  phase: "sanitized_retry"
+  reason: string
+  sanitizedFields: string[]
+  status?: number
+  modelId?: string
 }
 
 export type QuotaAdaptiveOptions = {
@@ -382,17 +414,44 @@ class QuotaGovernor {
       remainingTokens <= Math.max(1, Math.floor(limitTokens * adaptive.lowWatermarkRatio))
 
     if (remainingRequests !== undefined && remainingRequests <= 0) {
-      this.setCooldown(Math.max(adaptive.minCooldownMs, this.runtime.windowMs))
+      const cooldownMs = Math.max(adaptive.minCooldownMs, this.runtime.windowMs)
+      this.setCooldown(cooldownMs)
+      this.options?.onAdaptiveCooldown?.({
+        eventVersion: "v1",
+        phase: "adaptive_cooldown",
+        cooldownMs,
+        reason: "requests_depleted",
+        remainingRequests,
+        ...(remainingTokens !== undefined ? { remainingTokens } : {}),
+      })
       return
     }
 
     if (remainingTokens !== undefined && remainingTokens <= 0) {
-      this.setCooldown(Math.max(adaptive.minCooldownMs, this.runtime.windowMs))
+      const cooldownMs = Math.max(adaptive.minCooldownMs, this.runtime.windowMs)
+      this.setCooldown(cooldownMs)
+      this.options?.onAdaptiveCooldown?.({
+        eventVersion: "v1",
+        phase: "adaptive_cooldown",
+        cooldownMs,
+        reason: "tokens_depleted",
+        ...(remainingRequests !== undefined ? { remainingRequests } : {}),
+        remainingTokens,
+      })
       return
     }
 
     if (nearRequestFloor || nearTokenFloor) {
-      this.setCooldown(Math.max(adaptive.minCooldownMs, adaptive.lowCooldownMs))
+      const cooldownMs = Math.max(adaptive.minCooldownMs, adaptive.lowCooldownMs)
+      this.setCooldown(cooldownMs)
+      this.options?.onAdaptiveCooldown?.({
+        eventVersion: "v1",
+        phase: "adaptive_cooldown",
+        cooldownMs,
+        reason: "low_watermark",
+        ...(remainingRequests !== undefined ? { remainingRequests } : {}),
+        ...(remainingTokens !== undefined ? { remainingTokens } : {}),
+      })
       return
     }
   }
@@ -513,6 +572,14 @@ export function wrapFetchWithQuota(
         const shouldFallback = await shouldRetryWithSanitizedBody(response)
         if (shouldFallback) {
           governor.rememberSanitizeAlways(modelId)
+          options?.onSanitizedRetry?.({
+            eventVersion: "v1",
+            phase: "sanitized_retry",
+            reason: "schema_rejection",
+            sanitizedFields: ["reasoning_content", "reasoning"],
+            status: response.status,
+            ...(modelId ? { modelId } : {}),
+          })
           autoFallbackTried = true
           attempt -= 1
           continue
@@ -530,6 +597,15 @@ export function wrapFetchWithQuota(
         const fallback = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 1))
         const cooldown = Math.max(retry.cooldownOn429Ms, retryAfterMs ?? 0)
         governor.setCooldown(cooldown)
+        options?.onRetry?.({
+          eventVersion: "v1",
+          phase: "retry",
+          attempt,
+          reason: "status_429",
+          status: 429,
+          ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+          ...(modelId ? { modelId } : {}),
+        })
         await waitMs(
           Math.max(retryAfterMs ?? 0, jitterDelay(fallback, retry.jitterRatio)),
           nextInit?.signal,
@@ -541,6 +617,14 @@ export function wrapFetchWithQuota(
         Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 1)),
         retry.jitterRatio,
       )
+      options?.onRetry?.({
+        eventVersion: "v1",
+        phase: "retry",
+        attempt,
+        reason: "retryable_status",
+        status: response.status,
+        ...(modelId ? { modelId } : {}),
+      })
       await waitMs(delay, nextInit?.signal)
     }
 

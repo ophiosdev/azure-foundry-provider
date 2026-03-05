@@ -8,13 +8,16 @@ export type { ApiMode, HostType, ParsedEndpoint, PathType } from "./url"
 
 export type { ToolPolicy } from "./request"
 export type {
+  AdaptiveCooldownEvent,
   AssistantReasoningSanitizationPolicy,
   ModelRequestOptions,
   QuotaAdaptiveOptions,
   QuotaOptions,
   QuotaRetryOptions,
   QuotaRule,
+  RetryEvent,
   RequestPolicyOptions,
+  SanitizedRetryEvent,
 } from "./quota"
 
 export const azureFoundryProvider = createAzureFoundryProvider()

@@ -6,9 +6,12 @@ import { loadApiKey, loadSetting, withUserAgentSuffix } from "@ai-sdk/provider-u
 import type { FetchFunction } from "@ai-sdk/provider-utils"
 import { hasAuthHeader, wrapFetch } from "./provider-runtime"
 import {
+  type AdaptiveCooldownEvent,
   type AssistantReasoningSanitizationPolicy,
   type ModelRequestOptions,
   type QuotaOptions,
+  type RetryEvent,
+  type SanitizedRetryEvent,
   wrapFetchWithQuota,
 } from "./quota"
 import { applyRequestPolicy, type ToolPolicy } from "./request"
@@ -31,6 +34,18 @@ export type AzureFoundryOptions = {
   quota?: QuotaOptions
   assistantReasoningSanitization?: AssistantReasoningSanitizationPolicy
   modelOptions?: Record<string, ModelRequestOptions>
+  onRetry?: (event: RetryEvent) => void
+  onAdaptiveCooldown?: (event: AdaptiveCooldownEvent) => void
+  onSanitizedRetry?: (event: SanitizedRetryEvent) => void
+  onFallback?: (event: {
+    eventVersion: "v1"
+    phase: "fallback"
+    fromMode: "chat"
+    toMode: "responses"
+    reason: string
+    status?: number
+    modelId?: string
+  }) => void
   fetch?: FetchFunction
   name?: string
 }
@@ -49,6 +64,15 @@ type Resolved = {
   fetch: FetchFunction | undefined
   modelOptions: Record<string, ModelRequestOptions>
   headers: () => Record<string, string>
+  onFallback?: (event: {
+    eventVersion: "v1"
+    phase: "fallback"
+    fromMode: "chat"
+    toMode: "responses"
+    reason: string
+    status?: number
+    modelId?: string
+  }) => void
 }
 
 function noModel(modelType: "textEmbeddingModel" | "imageModel", modelId: string): never {
@@ -113,6 +137,9 @@ function resolve(options: AzureFoundryOptions): Resolved {
       ? { assistantReasoningSanitization: options.assistantReasoningSanitization }
       : {}),
     ...(options.modelOptions ? { modelOptions: options.modelOptions } : {}),
+    ...(options.onRetry ? { onRetry: options.onRetry } : {}),
+    ...(options.onAdaptiveCooldown ? { onAdaptiveCooldown: options.onAdaptiveCooldown } : {}),
+    ...(options.onSanitizedRetry ? { onSanitizedRetry: options.onSanitizedRetry } : {}),
   }
 
   const resolvedFetch = wrapFetchWithQuota(timeoutFetch ?? globalThis.fetch, policy)
@@ -147,6 +174,7 @@ function resolve(options: AzureFoundryOptions): Resolved {
     fetch: resolvedFetch,
     modelOptions: options.modelOptions ?? {},
     headers,
+    ...(options.onFallback ? { onFallback: options.onFallback } : {}),
   }
 }
 
@@ -214,6 +242,14 @@ export function createAzureFoundryProvider(
           return await chatModel.doGenerate(options)
         } catch (error) {
           if (!isChatOperationMismatchError(error)) throw error
+          cfg.onFallback?.({
+            eventVersion: "v1",
+            phase: "fallback",
+            fromMode: "chat",
+            toMode: "responses",
+            reason: "chat_operation_mismatch",
+            ...(modelId ? { modelId } : {}),
+          })
           return responsesModel.doGenerate(options)
         }
       },
@@ -222,6 +258,14 @@ export function createAzureFoundryProvider(
           return await chatModel.doStream(options)
         } catch (error) {
           if (!isChatOperationMismatchError(error)) throw error
+          cfg.onFallback?.({
+            eventVersion: "v1",
+            phase: "fallback",
+            fromMode: "chat",
+            toMode: "responses",
+            reason: "chat_operation_mismatch",
+            ...(modelId ? { modelId } : {}),
+          })
           return responsesModel.doStream(options)
         }
       },

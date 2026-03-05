@@ -149,6 +149,10 @@ type AzureFoundryOptions = {
       assistantReasoningSanitization?: "auto" | "always" | "never"
     }
   >
+  onRetry?: (event: RetryEvent) => void
+  onAdaptiveCooldown?: (event: AdaptiveCooldownEvent) => void
+  onSanitizedRetry?: (event: SanitizedRetryEvent) => void
+  onFallback?: (event: FallbackEvent) => void
   fetch?: FetchFunction
   name?: string
 }
@@ -187,6 +191,23 @@ type AzureFoundryOptions = {
 - `modelOptions`:
   - Model-specific overrides for provider behavior.
   - Supports per-model `apiMode` and `assistantReasoningSanitization`.
+- `onRetry`:
+  - Optional callback emitted before retry waits on retryable responses.
+  - Use it to understand retry pressure and tune retry/quota settings.
+  - Event contract: `{ eventVersion: "v1", phase: "retry", attempt, reason, status?, retryAfterMs?, modelId? }`.
+- `onAdaptiveCooldown`:
+  - Optional callback emitted when adaptive ratelimit headers trigger cooldown.
+  - Use it to correlate cooldown windows with endpoint pressure.
+  - Event contract: `{ eventVersion: "v1", phase: "adaptive_cooldown", cooldownMs, reason, remainingRequests?, remainingTokens?, modelId? }`.
+- `onSanitizedRetry`:
+  - Optional callback emitted when `assistantReasoningSanitization: "auto"` retries after schema rejection.
+  - Use it to identify strict endpoints/models that should move to per-model `"always"` sanitization.
+  - Event contract: `{ eventVersion: "v1", phase: "sanitized_retry", reason, sanitizedFields, status?, modelId? }`.
+- `onFallback`:
+  - Optional callback emitted when chat transport falls back to responses on operation mismatch.
+  - Use it to find models that should be explicitly configured for responses mode.
+  - Event contract: `{ eventVersion: "v1", phase: "fallback", fromMode: "chat", toMode: "responses", reason, status?, modelId? }`.
+  - Fallback guardrails are unchanged: disabled when chat mode is explicitly forced.
 - `fetch`:
   - Custom fetch implementation.
 - `name` (default `"azure-foundry"`):
@@ -221,6 +242,112 @@ the provider can retry once through responses transport for the same model. This
 - fallback disabled: explicit global `apiMode: "chat"` or per-model `apiMode: "chat"`
 
 This keeps strict explicit chat configurations deterministic while improving resilience for mixed model setups.
+
+## Observability callbacks
+
+The provider can emit callback events for retry, adaptive cooldown, sanitization retry, and chat->responses fallback decisions.
+
+Why these callbacks exist:
+
+- explain provider decisions in production without changing transport behavior
+- help tune retry/quota/sanitization settings from real runtime signals
+- make it easier to detect model/endpoint mismatches early
+
+Callbacks are optional. If you do not set them, behavior is unchanged.
+
+### Event reference (`eventVersion: "v1"`)
+
+| Callback             | Required fields                                         | Optional fields                                   | Typical reasons                                         |
+| -------------------- | ------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------- |
+| `onRetry`            | `eventVersion`, `phase`, `attempt`, `reason`            | `status`, `retryAfterMs`, `modelId`               | `status_429`, `retryable_status`                        |
+| `onAdaptiveCooldown` | `eventVersion`, `phase`, `cooldownMs`, `reason`         | `remainingRequests`, `remainingTokens`, `modelId` | `requests_depleted`, `tokens_depleted`, `low_watermark` |
+| `onSanitizedRetry`   | `eventVersion`, `phase`, `reason`, `sanitizedFields`    | `status`, `modelId`                               | `schema_rejection`                                      |
+| `onFallback`         | `eventVersion`, `phase`, `fromMode`, `toMode`, `reason` | `status`, `modelId`                               | `chat_operation_mismatch`                               |
+
+### Security and data boundaries
+
+Callback payloads are metadata-only. They intentionally exclude:
+
+- raw headers
+- raw request/response bodies
+- API keys and bearer tokens
+
+### Example: structured logging
+
+```ts
+import { createAzureFoundryProvider } from "azure-foundry-provider"
+
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  onRetry: (event) => {
+    console.info("provider.retry", event)
+  },
+  onAdaptiveCooldown: (event) => {
+    console.info("provider.cooldown", event)
+  },
+  onSanitizedRetry: (event) => {
+    console.info("provider.sanitized_retry", event)
+  },
+  onFallback: (event) => {
+    console.info("provider.fallback", event)
+  },
+})
+```
+
+### Example: metrics integration
+
+```ts
+import { createAzureFoundryProvider } from "azure-foundry-provider"
+
+type Metrics = {
+  count: (name: string, tags?: Record<string, string>) => void
+  histogram: (name: string, value: number, tags?: Record<string, string>) => void
+}
+
+const metrics: Metrics = {
+  count: (name, tags) => {
+    // wire to your metrics backend
+  },
+  histogram: (name, value, tags) => {
+    // wire to your metrics backend
+  },
+}
+
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  onRetry: (event) => {
+    metrics.count("azure_provider_retry_total", {
+      reason: event.reason,
+      status: String(event.status ?? "none"),
+      model: event.modelId ?? "unknown",
+    })
+  },
+  onAdaptiveCooldown: (event) => {
+    metrics.histogram("azure_provider_cooldown_ms", event.cooldownMs, {
+      reason: event.reason,
+      model: event.modelId ?? "unknown",
+    })
+  },
+  onFallback: (event) => {
+    metrics.count("azure_provider_fallback_total", {
+      reason: event.reason,
+      from: event.fromMode,
+      to: event.toMode,
+      model: event.modelId ?? "unknown",
+    })
+  },
+})
+```
+
+### Example: config tuning workflow
+
+Use callbacks to turn runtime observations into explicit config:
+
+1. If `onFallback` fires repeatedly for a model, set `modelOptions[modelId].apiMode = "responses"`.
+2. If `onSanitizedRetry` fires repeatedly for a model, set `modelOptions[modelId].assistantReasoningSanitization = "always"`.
+3. If `onRetry` + `onAdaptiveCooldown` rates are high, tune `quota.retry` and review endpoint capacity.
 
 ## Auth behavior
 

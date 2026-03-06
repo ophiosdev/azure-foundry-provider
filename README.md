@@ -28,10 +28,12 @@ The codebase adheres to the highest standards of modern TypeScript development, 
 - Chat transport uses OpenAI-compatible semantics (system role remains `system`, `max_tokens` is used)
 - Request policy control for tools (`auto`, `off`, `on`)
 - Built-in retries and 429 handling with exponential backoff + jitter
+- Event-driven waiter queue for `maxConcurrent` admission (wake-on-release, abort-aware waits)
 - Optional static quota controls (`rpm`, `tpm`, `maxConcurrent`, `maxOutputTokensCap`)
 - Adaptive throttling from Azure `x-ratelimit-*` headers
 - Request sanitization for chat history compatibility (removes assistant `reasoning_content`/`reasoning` fields)
 - Automatic chat->responses fallback for model/operation mismatch errors (when mode is not explicitly forced to chat)
+- Optional observability callbacks (`onRetry`, `onAdaptiveCooldown`, `onSanitizedRetry`, `onFallback`)
 - Timeout support via `AbortSignal`
 
 ## Supported endpoint patterns

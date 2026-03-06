@@ -23,23 +23,21 @@ function dropParallelToolCalls(
 ): SharedV2ProviderOptions | undefined {
   if (!providerOptions) return undefined
 
-  const result = Object.fromEntries(
-    Object.entries(providerOptions).map(([key, value]) => {
-      if (key !== "openai") return [key, value]
-      if (!isRecord(value)) return [key, value]
-      const next = Object.fromEntries(
-        Object.entries(value).filter(([k]) => k !== "parallelToolCalls"),
-      )
-      if (Object.keys(next).length === 0) return [key, undefined]
-      return [key, next]
-    }),
-  )
+  const openaiOptions = providerOptions["openai"]
+  if (!isRecord(openaiOptions)) return providerOptions
 
-  const cleaned = Object.fromEntries(
-    Object.entries(result).filter(([, value]) => value !== undefined),
-  )
-  if (Object.keys(cleaned).length === 0) return undefined
-  return cleaned as SharedV2ProviderOptions
+  if (!Object.prototype.hasOwnProperty.call(openaiOptions, "parallelToolCalls")) {
+    return providerOptions
+  }
+
+  const { parallelToolCalls: _ignored, ...openaiRest } = openaiOptions
+  const entries = Object.entries(providerOptions).filter(([key]) => key !== "openai")
+  if (Object.keys(openaiRest).length > 0) {
+    entries.push(["openai", openaiRest])
+  }
+
+  if (entries.length === 0) return undefined
+  return Object.fromEntries(entries) as SharedV2ProviderOptions
 }
 
 function stripTools(options: LanguageModelV2CallOptions): LanguageModelV2CallOptions {

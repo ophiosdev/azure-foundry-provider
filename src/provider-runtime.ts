@@ -2,10 +2,14 @@ import type { FetchFunction } from "@ai-sdk/provider-utils"
 
 function hasAuthHeader(headers: Record<string, string> | undefined): boolean {
   if (!headers) return false
-  return Object.keys(headers).some((key) => {
+  for (const key in headers) {
+    if (!Object.prototype.hasOwnProperty.call(headers, key)) continue
+    if (key === "authorization" || key === "Authorization") return true
+    if (key === "api-key" || key === "Api-Key") return true
     const lower = key.toLowerCase()
-    return lower === "authorization" || lower === "api-key"
-  })
+    if (lower === "authorization" || lower === "api-key") return true
+  }
+  return false
 }
 
 function mergeSignals(existing: AbortSignal | null | undefined, timeout: number): AbortSignal {

@@ -115,6 +115,57 @@ describe("applyRequestPolicy", () => {
     expect(call.providerOptions?.["openai"]?.["store"]).toBe(true)
   })
 
+  test("toolPolicy off reuses providerOptions when no openai options", async () => {
+    const { model, calls } = mockModel()
+    const wrapped = applyRequestPolicy(model, { mode: "chat", toolPolicy: "off" })
+
+    const providerOptions = {
+      custom: {
+        a: 1,
+      },
+    }
+
+    await wrapped.doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "x",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ],
+      providerOptions,
+    })
+
+    const call = calls[0]
+    if (!call) throw new Error("missing call")
+    expect(call.providerOptions).toBe(providerOptions)
+  })
+
+  test("toolPolicy off reuses openai object when no parallelToolCalls", async () => {
+    const { model, calls } = mockModel()
+    const wrapped = applyRequestPolicy(model, { mode: "chat", toolPolicy: "off" })
+
+    const openai = { store: true }
+    const providerOptions = { openai }
+
+    await wrapped.doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "x",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ],
+      providerOptions,
+    })
+
+    const call = calls[0]
+    if (!call) throw new Error("missing call")
+    expect(call.providerOptions?.["openai"]).toBe(openai)
+  })
+
   test("toolPolicy on forces required when tools exist", async () => {
     const { model, calls } = mockModel()
     const wrapped = applyRequestPolicy(model, { mode: "chat", toolPolicy: "on" })

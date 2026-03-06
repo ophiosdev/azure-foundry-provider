@@ -308,6 +308,59 @@ describe("wrapFetchWithQuota", () => {
     expect(count).toBe(2)
   })
 
+  test("reuses transformed payload bytes across retry attempts", async () => {
+    const sentBodies: string[] = []
+    let count = 0
+
+    const fetchBase = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      count += 1
+      sentBodies.push(String(init?.body ?? ""))
+      if (count === 1) {
+        return mkErrorResponse(500, "temp")
+      }
+      return mkResponse(200, { ok: true })
+    }
+
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: {
+        default: { maxOutputTokensCap: 10 },
+        retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+      },
+    })
+
+    const res = await wrapped("https://example.com", { method: "POST", body: makeBody("m") })
+    expect(res.status).toBe(200)
+    expect(sentBodies.length).toBe(2)
+    expect(sentBodies[0]).toBe(sentBodies[1])
+
+    const parsed = JSON.parse(sentBodies[0] ?? "{}") as Record<string, unknown>
+    expect(parsed["max_tokens"]).toBe(10)
+  })
+
+  test("keeps invalid-json body unchanged across retry", async () => {
+    const sentBodies: Array<BodyInit | null | undefined> = []
+    let count = 0
+    const fetchBase = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      count += 1
+      sentBodies.push(init?.body)
+      if (count === 1) {
+        return mkErrorResponse(500, "temp")
+      }
+      return mkResponse(200, { ok: true })
+    }
+
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: { retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 } },
+    })
+
+    const raw = "{"
+    const res = await wrapped("https://example.com", { method: "POST", body: raw })
+    expect(res.status).toBe(200)
+    expect(sentBodies.length).toBe(2)
+    expect(sentBodies[0]).toBe(raw)
+    expect(sentBodies[1]).toBe(raw)
+  })
+
   test("retry-after date honors clock delta in parser", () => {
     const target = new Date(10_000).toUTCString()
     expect(__test.parseRetryAfterMs(target, 8_000)).toBe(2_000)

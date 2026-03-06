@@ -132,6 +132,27 @@ describe("createAzureFoundryProvider", () => {
     expect(model.provider).toContain(".responses")
   })
 
+  test("repeated same-mode construction preserves deterministic provider mode", () => {
+    const provider = createAzureFoundryProvider({
+      endpoint:
+        "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+      apiKey: "k",
+    })
+
+    expect(provider.languageModel("gpt-4.1").provider).toContain(".chat")
+    expect(provider.languageModel("gpt-4.1").provider).toContain(".chat")
+  })
+
+  test("repeated same-mode construction preserves deterministic responses mode", () => {
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.cognitiveservices.azure.com/openai/responses?api-version=preview",
+      apiKey: "k",
+    })
+
+    expect(provider.languageModel("gpt-4.1").provider).toContain(".responses")
+    expect(provider.languageModel("gpt-4.1").provider).toContain(".responses")
+  })
+
   test("model option apiMode overrides global mode for languageModel", () => {
     const provider = createAzureFoundryProvider({
       endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",

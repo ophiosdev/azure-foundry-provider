@@ -47,6 +47,7 @@ export type RequestPolicyOptions = {
   quota?: QuotaOptions
   assistantReasoningSanitization?: AssistantReasoningSanitizationPolicy
   modelOptions?: Record<string, ModelRequestOptions>
+  cooldownScope?: "global" | "per-model"
   onRetry?: (event: RetryEvent) => void
   onAdaptiveCooldown?: (event: AdaptiveCooldownEvent) => void
   onSanitizedRetry?: (event: SanitizedRetryEvent) => void
@@ -214,6 +215,7 @@ class QuotaGovernor {
   private readonly windows = new Map<string, WindowState>()
   private readonly sanitizeAlways = new Set<string>()
   private cooldownUntil = 0
+  private cooldownByModel = new Map<string, number>()
   private lastSweepAt = 0
 
   constructor(options: RequestPolicyOptions | undefined, runtime: GovernorRuntime) {
@@ -359,10 +361,15 @@ class QuotaGovernor {
     const hasLimits = hasAnyLimit(rule)
     const now = this.runtime.now()
     this.maybeSweep(now)
+    const cooldownScope = this.options?.cooldownScope ?? "global"
 
     if (!hasLimits) {
-      if (this.cooldownUntil > now) {
-        await this.runtime.wait(this.cooldownUntil - now, signal)
+      const modelCooldown =
+        cooldownScope === "per-model" && modelId
+          ? (this.cooldownByModel.get(modelId) ?? 0)
+          : this.cooldownUntil
+      if (modelCooldown > now) {
+        await this.runtime.wait(modelCooldown - now, signal)
       }
       return () => {}
     }
@@ -382,8 +389,12 @@ class QuotaGovernor {
         throw abortError()
       }
 
-      if (this.cooldownUntil > now) {
-        await this.runtime.wait(this.cooldownUntil - now, signal)
+      const modelCooldown =
+        cooldownScope === "per-model" && modelId
+          ? (this.cooldownByModel.get(modelId) ?? 0)
+          : this.cooldownUntil
+      if (modelCooldown > now) {
+        await this.runtime.wait(modelCooldown - now, signal)
         continue
       }
 
@@ -449,9 +460,14 @@ class QuotaGovernor {
     }
   }
 
-  setCooldown(delayMs: number): void {
+  setCooldown(delayMs: number, modelId?: string): void {
     if (!Number.isFinite(delayMs) || delayMs <= 0) return
     const target = this.runtime.now() + delayMs
+    const scope = this.options?.cooldownScope ?? "global"
+    if (scope === "per-model" && modelId) {
+      this.cooldownByModel.set(modelId, Math.max(this.cooldownByModel.get(modelId) ?? 0, target))
+      return
+    }
     this.cooldownUntil = Math.max(this.cooldownUntil, target)
   }
 
@@ -480,7 +496,7 @@ class QuotaGovernor {
     }
   }
 
-  applyRateLimitHeaders(response: Response): void {
+  applyRateLimitHeaders(response: Response, modelId?: string): void {
     const adaptive = this.getAdaptiveOptions()
     if (!adaptive.enabled) return
 
@@ -501,7 +517,7 @@ class QuotaGovernor {
 
     if (remainingRequests !== undefined && remainingRequests <= 0) {
       const cooldownMs = Math.max(adaptive.minCooldownMs, this.runtime.windowMs)
-      this.setCooldown(cooldownMs)
+      this.setCooldown(cooldownMs, modelId)
       this.options?.onAdaptiveCooldown?.({
         eventVersion: "v1",
         phase: "adaptive_cooldown",
@@ -515,7 +531,7 @@ class QuotaGovernor {
 
     if (remainingTokens !== undefined && remainingTokens <= 0) {
       const cooldownMs = Math.max(adaptive.minCooldownMs, this.runtime.windowMs)
-      this.setCooldown(cooldownMs)
+      this.setCooldown(cooldownMs, modelId)
       this.options?.onAdaptiveCooldown?.({
         eventVersion: "v1",
         phase: "adaptive_cooldown",
@@ -529,7 +545,7 @@ class QuotaGovernor {
 
     if (nearRequestFloor || nearTokenFloor) {
       const cooldownMs = Math.max(adaptive.minCooldownMs, adaptive.lowCooldownMs)
-      this.setCooldown(cooldownMs)
+      this.setCooldown(cooldownMs, modelId)
       this.options?.onAdaptiveCooldown?.({
         eventVersion: "v1",
         phase: "adaptive_cooldown",
@@ -652,7 +668,7 @@ export function wrapFetchWithQuota(
 
       release()
 
-      governor.applyRateLimitHeaders(response)
+      governor.applyRateLimitHeaders(response, modelId)
 
       if (!shouldSanitize && sanitization === "auto" && !autoFallbackTried) {
         const shouldFallback = await shouldRetryWithSanitizedBody(response)
@@ -682,7 +698,7 @@ export function wrapFetchWithQuota(
           : undefined
         const fallback = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 1))
         const cooldown = Math.max(retry.cooldownOn429Ms, retryAfterMs ?? 0)
-        governor.setCooldown(cooldown)
+        governor.setCooldown(cooldown, modelId)
         options?.onRetry?.({
           eventVersion: "v1",
           phase: "retry",

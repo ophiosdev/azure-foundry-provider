@@ -32,6 +32,7 @@ export type AzureFoundryOptions = {
   toolPolicy?: ToolPolicy
   timeout?: number | false
   quota?: QuotaOptions
+  cooldownScope?: "global" | "per-model"
   assistantReasoningSanitization?: AssistantReasoningSanitizationPolicy
   modelOptions?: Record<string, ModelRequestOptions>
   onRetry?: (event: RetryEvent) => void
@@ -137,6 +138,7 @@ function resolve(options: AzureFoundryOptions): Resolved {
       ? { assistantReasoningSanitization: options.assistantReasoningSanitization }
       : {}),
     ...(options.modelOptions ? { modelOptions: options.modelOptions } : {}),
+    ...(options.cooldownScope ? { cooldownScope: options.cooldownScope } : {}),
     ...(options.onRetry ? { onRetry: options.onRetry } : {}),
     ...(options.onAdaptiveCooldown ? { onAdaptiveCooldown: options.onAdaptiveCooldown } : {}),
     ...(options.onSanitizedRetry ? { onSanitizedRetry: options.onSanitizedRetry } : {}),

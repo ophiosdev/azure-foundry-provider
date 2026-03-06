@@ -600,6 +600,93 @@ function activeTokens() {
 
 The real implementation also adds bounded compaction and integrates these active windows directly into RPM/TPM wait calculations.
 
+### Event-driven waiter queue (`maxConcurrent`)
+
+When `maxConcurrent` is configured, the governor must decide when waiting requests are allowed to start. The provider uses an event-driven waiter queue for this path.
+
+#### Why this exists
+
+A polling approach (for example waking every fixed interval) adds avoidable wakeups and increases contention jitter. Under sustained load, polling can make latency less predictable because many wait cycles are spent checking unchanged state.
+
+The event-driven queue removes that polling loop:
+
+- if capacity is available, request is admitted immediately
+- if capacity is full, request registers a waiter and sleeps
+- when a running request releases capacity, one waiter is signaled
+
+This converts concurrency waiting from timer-driven checks to release-driven notifications.
+
+#### How it works in this provider
+
+For each model window, the governor keeps a FIFO waiter list used only for `maxConcurrent` contention.
+
+Acquire path (simplified):
+
+1. Check current `active` count against `maxConcurrent`.
+2. If at capacity, enqueue a waiter callback.
+3. If `AbortSignal` triggers while queued, remove waiter and reject with `AbortError`.
+4. On wakeup, re-enter admission checks and proceed when allowed.
+
+Release path (simplified):
+
+1. Decrement `active` count.
+2. Pop the next waiter from the FIFO queue.
+3. Signal exactly one waiter to continue.
+
+This preserves deterministic queueing behavior while avoiding broadcast wakeups.
+
+#### Abort behavior while queued
+
+Queued waits remain abort-aware:
+
+- aborted waiters are removed from the queue
+- aborted requests do not hold a slot and do not block later waiters
+
+This avoids stale waiters accumulating during client-side timeouts or cancellations.
+
+#### Operational impact
+
+- Fewer unnecessary timer wakeups in `maxConcurrent` contention scenarios.
+- Better tail latency stability compared with fixed-interval polling.
+- No change to public quota semantics; only the internal waiting strategy is changed.
+
+#### Conceptual example
+
+```ts
+const waiters: Array<() => void> = []
+let active = 0
+const maxConcurrent = 1
+
+async function acquire(signal?: AbortSignal) {
+  while (active >= maxConcurrent) {
+    await new Promise<void>((resolve, reject) => {
+      const onWake = () => {
+        signal?.removeEventListener("abort", onAbort)
+        resolve()
+      }
+      const onAbort = () => {
+        const i = waiters.indexOf(onWake)
+        if (i >= 0) waiters.splice(i, 1)
+        reject(new DOMException("aborted", "AbortError"))
+      }
+
+      waiters.push(onWake)
+      signal?.addEventListener("abort", onAbort, { once: true })
+    })
+  }
+
+  active += 1
+
+  return () => {
+    active = Math.max(0, active - 1)
+    const next = waiters.shift()
+    next?.()
+  }
+}
+```
+
+In the provider, this waiter mechanism is integrated with RPM/TPM checks, adaptive cooldown, retry behavior, and abort-aware request handling.
+
 ## Examples
 
 ### 1) Minimal (adaptive-only)

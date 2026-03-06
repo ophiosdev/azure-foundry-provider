@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Ophios GmbH and contributors
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
 import { describe, expect, test } from "bun:test"
 import { __test, wrapFetchWithQuota } from "../src/quota"
 import { shouldRetryWithSanitizedBody } from "../src/quota-sanitize"

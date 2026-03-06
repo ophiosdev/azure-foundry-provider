@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Ophios GmbH and contributors
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
 const MAX_FALLBACK_RESPONSE_BODY_PARSE_BYTES = 64 * 1024
 
 function isRecord(value: unknown): value is Record<string, unknown> {

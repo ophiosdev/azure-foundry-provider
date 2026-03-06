@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Ophios GmbH and contributors
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
 import { OpenAIResponsesLanguageModel } from "@ai-sdk/openai/internal"
 import { OpenAICompatibleChatLanguageModel } from "@ai-sdk/openai-compatible"
 import type { EmbeddingModelV2, ImageModelV2, LanguageModelV2, ProviderV2 } from "@ai-sdk/provider"

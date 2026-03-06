@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Ophios GmbH and contributors
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
 import { describe, expect, test } from "bun:test"
 import { createAzureFoundryProvider } from "../src/provider"
 import { isChatOperationMismatchError } from "../src/provider-errors"

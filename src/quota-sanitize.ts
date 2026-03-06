@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Ophios GmbH and contributors
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
 const MAX_SANITIZE_ERROR_SCAN_CHARS = 64 * 1024
 
 function hasSchemaLikeSignal(text: string): boolean {

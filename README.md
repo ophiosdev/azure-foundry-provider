@@ -689,6 +689,89 @@ async function acquire(signal?: AbortSignal) {
 
 In the provider, this waiter mechanism is integrated with RPM/TPM checks, adaptive cooldown, retry behavior, and abort-aware request handling.
 
+### O(1) token-window accounting
+
+Token-per-minute (TPM) limiting can become expensive if each admission check re-sums all active token events in the window. To keep the hot path stable under load, the provider maintains a rolling token sum per model window.
+
+#### Why this exists
+
+A scan-based TPM check often looks like this:
+
+- prune old token events
+- sum all remaining token values
+- compare `sum + pendingTokens` against `tpm`
+
+That repeated summation adds avoidable work at high request rates.
+
+The provider avoids this by tracking a running aggregate:
+
+- append token events on admit
+- keep `tokenSum` as the current active-window total
+- subtract evicted event values during prune
+
+This makes the common-path accounting constant-time with amortized pruning work.
+
+#### How it works in this provider
+
+For each model window, the governor tracks:
+
+- `tokens`: token events (`{ at, tokens }`)
+- `tokenHead`: index of first active token event
+- `tokenSum`: running total of active-window token usage
+
+Admission flow for TPM (simplified):
+
+1. Prune expired token events (`at < now - windowMs`).
+2. For each evicted event, decrement `tokenSum`.
+3. Fast check: if `tokenSum + pendingTokens <= tpm`, admit immediately.
+4. If over limit, compute the next admissible time by walking forward from `tokenHead` until the projected sum fits.
+5. On admit, append event and increment `tokenSum`.
+
+The fast check is O(1). The fallback walk only occurs when the request is currently over budget.
+
+#### Correctness behavior
+
+- The running sum always reflects active-window token usage after prune.
+- Each committed token event is added once and removed once.
+- Oversized single requests (`pendingTokens > tpm`) keep existing behavior and are not blocked by TPM wait logic.
+- No external API/contract changes: this is internal governor accounting behavior.
+
+#### Operational impact
+
+- Lower CPU overhead in TPM-heavy workloads.
+- More predictable latency during sustained token traffic.
+- Fewer full-window token summations in steady-state admission checks.
+
+#### Conceptual example
+
+```ts
+type TokenEvent = { at: number; tokens: number }
+
+let tokenEvents: TokenEvent[] = []
+let tokenHead = 0
+let tokenSum = 0
+
+function prune(now: number, windowMs: number) {
+  const min = now - windowMs
+  while (tokenHead < tokenEvents.length && tokenEvents[tokenHead]!.at < min) {
+    tokenSum -= tokenEvents[tokenHead]!.tokens
+    tokenHead += 1
+  }
+}
+
+function canAdmit(now: number, windowMs: number, tpm: number, pendingTokens: number) {
+  prune(now, windowMs)
+  return pendingTokens > tpm || tokenSum + pendingTokens <= tpm
+}
+
+function commit(now: number, pendingTokens: number) {
+  tokenEvents.push({ at: now, tokens: pendingTokens })
+  tokenSum += pendingTokens
+}
+```
+
+The provider combines this accounting with head-index pruning, event-driven `maxConcurrent` waiting, adaptive cooldown, and retry behavior in one admission loop.
+
 ## Examples
 
 ### 1) Minimal (adaptive-only)

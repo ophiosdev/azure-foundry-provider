@@ -25,6 +25,10 @@ function stringifyBody(body: Record<string, unknown>): string {
   return JSON.stringify(body)
 }
 
+function cloneJsonRecord(body: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(body)) as Record<string, unknown>
+}
+
 function readTextLength(content: unknown): number {
   if (typeof content === "string") return content.length
   if (!Array.isArray(content)) return 0
@@ -136,6 +140,7 @@ function getRpmWaitMs(windowMs: number, requests: number[], now: number, rpm: nu
 
 export {
   clampPositive,
+  cloneJsonRecord,
   estimatePromptTokens,
   estimateRequestedTokens,
   getRpmWaitMs,

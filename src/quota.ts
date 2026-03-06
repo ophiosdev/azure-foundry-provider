@@ -3,6 +3,7 @@ import type { ApiMode } from "./url"
 import { sanitizeBody, shouldRetryWithSanitizedBody } from "./quota-sanitize"
 import {
   clampPositive,
+  cloneJsonRecord,
   estimateRequestedTokens,
   getRpmWaitMs,
   isRetryableStatus,
@@ -617,36 +618,73 @@ export function wrapFetchWithQuota(
     const retry = governor.getRetryOptions()
     let attempt = 0
     let autoFallbackTried = false
+    const baseInit = init ? { ...init } : undefined
+    const originalBody = baseInit?.body
+    const parsedOriginal = parseJsonBody(originalBody)
+    const modelIdFromOriginal =
+      parsedOriginal && typeof parsedOriginal["model"] === "string"
+        ? parsedOriginal["model"]
+        : undefined
+
+    let transformedBody: string | undefined
+    let transformedParsed: Record<string, unknown> | undefined
+
+    const invalidateTransformedCache = (): void => {
+      transformedBody = undefined
+      transformedParsed = undefined
+    }
+
+    const getTransformed = (): {
+      body: BodyInit | null | undefined
+      parsed: Record<string, unknown> | undefined
+      modelId: string | undefined
+      estimatedTokens: number
+    } => {
+      if (parsedOriginal === undefined) {
+        return {
+          body: originalBody,
+          parsed: undefined,
+          modelId: undefined,
+          estimatedTokens: 512,
+        }
+      }
+
+      if (transformedBody === undefined || transformedParsed === undefined) {
+        const shouldSanitize = governor.resolveSanitizationPolicy(modelIdFromOriginal) === "always"
+        let nextParsed = governor.clampMaxOutput(cloneJsonRecord(parsedOriginal))
+        if (shouldSanitize) {
+          nextParsed = sanitizeBody(nextParsed)
+        }
+        transformedParsed = nextParsed
+        transformedBody = stringifyBody(nextParsed)
+      }
+
+      return {
+        body: transformedBody,
+        parsed: transformedParsed,
+        modelId: modelIdFromOriginal,
+        estimatedTokens: estimateRequestedTokens(transformedParsed),
+      }
+    }
 
     while (attempt < retry.maxAttempts) {
       attempt += 1
 
-      const baseInit = init ? { ...init } : undefined
-      let parsed = parseJsonBody(baseInit?.body)
-      if (parsed) {
-        parsed = governor.clampMaxOutput(parsed)
-      }
-
-      const modelId = parsed && typeof parsed["model"] === "string" ? parsed["model"] : undefined
+      const transformed = getTransformed()
+      const modelId = transformed.modelId
       const sanitization = governor.resolveSanitizationPolicy(modelId)
       const shouldSanitize = sanitization === "always"
-
-      if (parsed && shouldSanitize) {
-        parsed = sanitizeBody(parsed)
+      let nextInit = baseInit ? { ...baseInit } : undefined
+      if (transformed.body !== undefined) {
+        nextInit = {
+          ...(nextInit ?? {}),
+          body: transformed.body,
+        }
       }
-
-      const estimatedTokens = parsed ? estimateRequestedTokens(parsed) : 512
-
-      const nextInit = parsed
-        ? {
-            ...baseInit,
-            body: stringifyBody(parsed),
-          }
-        : baseInit
 
       const release = await governor.acquire(
         modelId,
-        estimatedTokens,
+        transformed.estimatedTokens,
         nextInit?.signal ?? undefined,
       )
 
@@ -674,6 +712,7 @@ export function wrapFetchWithQuota(
         const shouldFallback = await shouldRetryWithSanitizedBody(response)
         if (shouldFallback) {
           governor.rememberSanitizeAlways(modelId)
+          invalidateTransformedCache()
           options?.onSanitizedRetry?.({
             eventVersion: "v1",
             phase: "sanitized_retry",

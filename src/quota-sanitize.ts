@@ -1,3 +1,18 @@
+const MAX_SANITIZE_ERROR_SCAN_CHARS = 64 * 1024
+
+function hasSchemaLikeSignal(text: string): boolean {
+  return (
+    text.includes("extra_forbidden") ||
+    text.includes("additional properties") ||
+    text.includes("extra inputs are not permitted") ||
+    text.includes("invalid input")
+  )
+}
+
+function hasReasoningSignal(text: string): boolean {
+  return text.includes("reasoning_content") || text.includes('"reasoning"')
+}
+
 function sanitizeChatMessages(messages: unknown): unknown {
   if (!Array.isArray(messages)) return messages
 
@@ -32,14 +47,17 @@ function shouldRetryWithSanitizedBody(response: Response): Promise<boolean> {
     .clone()
     .json()
     .then((json) => {
-      const text = JSON.stringify(json).toLowerCase()
-      const hasReasoningField = text.includes("reasoning_content") || text.includes('"reasoning"')
-      const schemaLike =
-        text.includes("extra_forbidden") ||
-        text.includes("additional properties") ||
-        text.includes("extra inputs are not permitted") ||
-        text.includes("invalid input")
-      return hasReasoningField && schemaLike
+      if (typeof json === "string") {
+        if (json.length > MAX_SANITIZE_ERROR_SCAN_CHARS) return false
+        const text = json.toLowerCase()
+        return hasReasoningSignal(text) && hasSchemaLikeSignal(text)
+      }
+
+      const text = JSON.stringify(json)
+      if (text.length > MAX_SANITIZE_ERROR_SCAN_CHARS) return false
+
+      const lower = text.toLowerCase()
+      return hasReasoningSignal(lower) && hasSchemaLikeSignal(lower)
     })
     .catch(() => false)
 }

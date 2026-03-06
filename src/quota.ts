@@ -101,6 +101,7 @@ type WindowState = {
   tokens: TokenEvent[]
   tokenHead: number
   lastSeen: number
+  waiters: Array<() => void>
 }
 
 type ResolvedRetry = {
@@ -260,6 +261,7 @@ class QuotaGovernor {
       tokens: [],
       tokenHead: 0,
       lastSeen: now,
+      waiters: [],
     }
     this.windows.set(modelId, created)
     return created
@@ -370,7 +372,26 @@ class QuotaGovernor {
       let waitFor = 0
 
       if (maxConcurrent !== undefined && window.active >= maxConcurrent) {
-        waitFor = Math.max(waitFor, 50)
+        await new Promise<void>((resolve, reject) => {
+          const onWake = () => {
+            signal?.removeEventListener("abort", onAbort)
+            resolve()
+          }
+          const onAbort = () => {
+            const idx = window.waiters.indexOf(onWake)
+            if (idx >= 0) window.waiters.splice(idx, 1)
+            signal?.removeEventListener("abort", onAbort)
+            reject(abortError())
+          }
+
+          window.waiters.push(onWake)
+          if (signal?.aborted) {
+            onAbort()
+            return
+          }
+          signal?.addEventListener("abort", onAbort, { once: true })
+        })
+        continue
       }
 
       if (rpm !== undefined) {
@@ -404,6 +425,8 @@ class QuotaGovernor {
       const next = Math.max(0, window.active - 1)
       window.active = next
       window.lastSeen = this.runtime.now()
+      const waiter = window.waiters.shift()
+      waiter?.()
       this.maybeSweep(window.lastSeen)
     }
   }

@@ -772,4 +772,36 @@ describe("quota internals", () => {
     releaseA()
     releaseB()
   })
+
+  test("maxConcurrent waiting uses event-driven release wakeup", async () => {
+    let now = 0
+    const waits: number[] = []
+    const governor = __test.createGovernor(
+      {
+        quota: {
+          default: { maxConcurrent: 1 },
+        },
+      },
+      {
+        now: () => now,
+        wait: async (ms: number) => {
+          waits.push(ms)
+          now += ms
+        },
+        windowMs: 100,
+      },
+    )
+
+    const releaseA = await governor.acquire("a", 1)
+    const acquireB = governor.acquire("a", 1)
+
+    await Promise.resolve()
+    const hasPolling = waits.includes(50)
+
+    releaseA()
+    const releaseB = await acquireB
+    releaseB()
+
+    expect(hasPolling).toBe(false)
+  })
 })

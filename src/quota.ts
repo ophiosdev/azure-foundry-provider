@@ -5,7 +5,6 @@ import {
   clampPositive,
   estimateRequestedTokens,
   getRpmWaitMs,
-  getTpmWaitMs,
   isRetryableStatus,
   jitterDelay,
   parseHeaderInt,
@@ -100,6 +99,7 @@ type WindowState = {
   requestHead: number
   tokens: TokenEvent[]
   tokenHead: number
+  tokenSum: number
   lastSeen: number
   waiters: Array<() => void>
 }
@@ -260,6 +260,7 @@ class QuotaGovernor {
       requestHead: 0,
       tokens: [],
       tokenHead: 0,
+      tokenSum: 0,
       lastSeen: now,
       waiters: [],
     }
@@ -297,6 +298,7 @@ class QuotaGovernor {
     while (window.tokenHead < window.tokens.length) {
       const value = window.tokens[window.tokenHead]
       if (value === undefined || value.at >= min) break
+      window.tokenSum -= value.tokens
       window.tokenHead += 1
     }
 
@@ -317,14 +319,32 @@ class QuotaGovernor {
     return window.tokenHead === 0 ? window.tokens : window.tokens.slice(window.tokenHead)
   }
 
+  private tokenWaitMs(window: WindowState, now: number, limit: number, pending: number): number {
+    if (pending > limit) return 0
+    if (window.tokenSum + pending <= limit) return 0
+    let sum = window.tokenSum
+    for (let i = window.tokenHead; i < window.tokens.length; i += 1) {
+      const event = window.tokens[i]
+      if (event === undefined) continue
+      sum -= event.tokens
+      if (sum + pending <= limit) {
+        return Math.max(1, event.at + this.runtime.windowMs - now)
+      }
+    }
+    return this.runtime.windowMs
+  }
+
   debugWindowState(
     modelId: string,
-  ): { requestsLength: number; tokensLength: number; active: number } | undefined {
+  ):
+    | { requestsLength: number; tokensLength: number; tokenSum: number; active: number }
+    | undefined {
     const window = this.windows.get(modelId)
     if (!window) return undefined
     return {
       requestsLength: visibleLength(window.requests, window.requestHead),
       tokensLength: visibleLength(window.tokens, window.tokenHead),
+      tokenSum: window.tokenSum,
       active: window.active,
     }
   }
@@ -402,10 +422,7 @@ class QuotaGovernor {
       }
 
       if (enforceTpm && tpm !== undefined) {
-        waitFor = Math.max(
-          waitFor,
-          getTpmWaitMs(this.runtime.windowMs, this.activeTokens(window), now, tpm, estimatedTokens),
-        )
+        waitFor = Math.max(waitFor, this.tokenWaitMs(window, now, tpm, estimatedTokens))
       }
 
       if (waitFor > 0) {
@@ -417,6 +434,7 @@ class QuotaGovernor {
       window.requests.push(now)
       if (enforceTpm) {
         window.tokens.push({ at: now, tokens: estimatedTokens })
+        window.tokenSum += estimatedTokens
       }
       break
     }

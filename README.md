@@ -143,6 +143,7 @@ type AzureFoundryOptions = {
   toolPolicy?: "auto" | "off" | "on"
   timeout?: number | false
   quota?: QuotaOptions
+  cooldownScope?: "global" | "per-model"
   assistantReasoningSanitization?: "auto" | "always" | "never"
   modelOptions?: Record<
     string,
@@ -185,6 +186,10 @@ type AzureFoundryOptions = {
   - `undefined`: no timeout wrapper.
 - `quota`:
   - Static quota limits + retry + adaptive throttling options.
+- `cooldownScope` (default `"global"`):
+  - Controls how cooldown is applied after rate-limit pressure.
+  - `"global"`: one cooldown can pause all models using this provider instance.
+  - `"per-model"`: cooldown is isolated to the model that triggered it.
 - `assistantReasoningSanitization` (default `"auto"`):
   - Global policy for assistant reasoning field sanitization.
   - `"always"`: sanitize before first request.
@@ -771,6 +776,93 @@ function commit(now: number, pendingTokens: number) {
 ```
 
 The provider combines this accounting with head-index pruning, event-driven `maxConcurrent` waiting, adaptive cooldown, and retry behavior in one admission loop.
+
+### Cooldown scope (`global` vs `per-model`)
+
+Cooldown is the governor's temporary pause mechanism when rate-limit pressure is detected (for example from `429` handling or adaptive header signals). `cooldownScope` controls who the pause applies to.
+
+#### Why this setting matters
+
+In mixed-model workloads, one model can be much noisier than another. Without scope control, a cooldown triggered by one model can slow unrelated traffic.
+
+Use `cooldownScope` to choose behavior explicitly:
+
+- `"global"` (default): conservative shared backpressure across the provider instance
+- `"per-model"`: isolate cooldown impact to the model that triggered it
+
+#### How the two modes behave
+
+`"global"`:
+
+- one cooldown window is shared by all models using the provider instance
+- simplest and most conservative behavior for shared quotas
+- best when all models map to the same constrained upstream budget
+
+`"per-model"`:
+
+- cooldown windows are tracked per model id
+- model `A` can be paused while model `B` continues if `B` has available budget
+- best for mixed-model deployments where isolation matters
+
+#### When to use each mode
+
+Use `"global"` when:
+
+- you want strict backpressure for the whole provider
+- your deployment has one shared quota envelope and fairness between models is less important than global stability
+
+Use `"per-model"` when:
+
+- one model is frequently rate-limited and should not slow all others
+- you run heterogeneous model traffic and want better isolation
+
+#### Interaction with adaptive throttling and retries
+
+- Adaptive throttling (`x-ratelimit-*`) still decides when to apply cooldown.
+- Retry policy (`Retry-After`, jitter/backoff, `cooldownOn429Ms`) still decides delay magnitudes.
+- `cooldownScope` changes only the cooldown target (all models vs triggering model).
+
+#### Precedence and defaults
+
+- Default is `"global"` for backward-compatible behavior.
+- Scope is configured per provider instance via `cooldownScope`.
+- If omitted, behavior is identical to prior global cooldown behavior.
+
+#### Example: global cooldown (default)
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  quota: {
+    adaptive: { enabled: true },
+    retry: { maxAttempts: 4, cooldownOn429Ms: 10_000 },
+  },
+  // cooldownScope defaults to "global"
+})
+```
+
+#### Example: per-model cooldown isolation
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  apiKey: process.env.AZURE_API_KEY,
+  cooldownScope: "per-model",
+  quota: {
+    adaptive: { enabled: true },
+    retry: { maxAttempts: 4, cooldownOn429Ms: 10_000 },
+  },
+})
+```
+
+#### Observability tips
+
+To validate your choice in production:
+
+- track `onAdaptiveCooldown` and `onRetry` by `modelId`
+- compare cooldown and retry rates before/after changing `cooldownScope`
+- if unrelated models are throttled together too often, switch to `"per-model"`
 
 ## Examples
 

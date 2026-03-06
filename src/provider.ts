@@ -184,15 +184,28 @@ export function createAzureFoundryProvider(
   options: AzureFoundryOptions = {},
 ): AzureFoundryProvider {
   let state: Resolved | undefined
+  const parsedEndpointByMode: Partial<
+    Record<"chat" | "responses" | "auto", ReturnType<typeof parseEndpoint>>
+  > = {}
 
   const get = () => {
     state = state ?? resolve(options)
     return state
   }
 
+  const getParsedEndpoint = (mode: ApiMode | undefined) => {
+    const cfg = get()
+    const key = mode ?? "auto"
+    const cached = parsedEndpointByMode[key]
+    if (cached) return cached
+    const parsed = parseEndpoint(cfg.endpoint, mode)
+    parsedEndpointByMode[key] = parsed
+    return parsed
+  }
+
   const createChat = (modelId: string) => {
     const cfg = get()
-    const endpoint = parseEndpoint(cfg.endpoint, "chat")
+    const endpoint = getParsedEndpoint("chat")
     const chatConfig = {
       provider: `${cfg.name}.chat`,
       url: () => endpoint.requestURL,
@@ -209,7 +222,7 @@ export function createAzureFoundryProvider(
 
   const createResponses = (modelId: string) => {
     const cfg = get()
-    const endpoint = parseEndpoint(cfg.endpoint, "responses")
+    const endpoint = getParsedEndpoint("responses")
     const responsesConfig = {
       provider: `${cfg.name}.responses`,
       url: () => endpoint.requestURL,
@@ -228,7 +241,7 @@ export function createAzureFoundryProvider(
   const createLanguageModel = (modelId: string) => {
     const cfg = get()
     const modelMode = cfg.modelOptions[modelId]?.apiMode
-    const endpoint = parseEndpoint(cfg.endpoint, modelMode ?? cfg.apiMode)
+    const endpoint = getParsedEndpoint(modelMode ?? cfg.apiMode)
     if (endpoint.mode === "responses") return createResponses(modelId)
 
     const chatModel = createChat(modelId)

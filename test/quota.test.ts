@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { __test, wrapFetchWithQuota } from "../src/quota"
+import { shouldRetryWithSanitizedBody } from "../src/quota-sanitize"
 
 function toFetchLike(
   fn: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
@@ -369,6 +370,59 @@ describe("wrapFetchWithQuota", () => {
 })
 
 describe("quota internals", () => {
+  test("sanitization detector ignores oversized payloads", async () => {
+    const huge = "x".repeat(200_000)
+    const response = new Response(
+      JSON.stringify({
+        error: {
+          message: `${huge} extra_forbidden reasoning_content invalid input`,
+        },
+      }),
+      {
+        status: 400,
+        headers: jsonHeaders(),
+      },
+    )
+
+    await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
+  })
+
+  test("sanitization detector retains existing positive shape", async () => {
+    const response = new Response(
+      JSON.stringify({
+        detail: [
+          {
+            type: "extra_forbidden",
+            loc: ["body", "messages", 0, "assistant", "reasoning_content"],
+            msg: "Extra inputs are not permitted",
+          },
+        ],
+      }),
+      {
+        status: 400,
+        headers: jsonHeaders(),
+      },
+    )
+
+    await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(true)
+  })
+
+  test("sanitization detector avoids false positive without schema marker", async () => {
+    const response = new Response(
+      JSON.stringify({
+        error: {
+          message: "reasoning_content appears in docs but request failed for unrelated reasons",
+        },
+      }),
+      {
+        status: 400,
+        headers: jsonHeaders(),
+      },
+    )
+
+    await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
+  })
+
   test("retry-after parser handles seconds and date", () => {
     expect(__test.parseRetryAfterMs("1")).toBe(1000)
     expect(__test.parseRetryAfterMs("not-a-date")).toBeUndefined()

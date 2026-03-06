@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { createAzureFoundryProvider } from "../src/provider"
+import { isChatOperationMismatchError } from "../src/provider-errors"
 
 function mkJsonResponse(status: number, body: unknown, headers?: Record<string, string>) {
   return new Response(JSON.stringify(body), {
@@ -71,6 +72,33 @@ function mkFetchSequence(sequence: Array<Response | Error>) {
 }
 
 describe("createAzureFoundryProvider", () => {
+  test("mismatch detector does not false trigger on oversized responseBody without chat context", () => {
+    const huge = "x".repeat(200_000)
+    const error = {
+      status: 400,
+      responseBody: `{"error":{"message":"${huge} operation_not_supported not available"}}`,
+      error: {
+        message: "operation_not_supported not available",
+      },
+    }
+
+    expect(isChatOperationMismatchError(error)).toBe(false)
+  })
+
+  test("mismatch detector keeps true positive for structured nested signals", () => {
+    const error = {
+      status: 400,
+      data: {
+        error: {
+          code: "operation_not_supported",
+          operation: "/chat/completions",
+        },
+      },
+    }
+
+    expect(isChatOperationMismatchError(error)).toBe(true)
+  })
+
   test("languageModel uses inferred chat mode", () => {
     const provider = createAzureFoundryProvider({
       endpoint:

@@ -5,7 +5,17 @@
 
 import { describe, expect, test } from "bun:test"
 import { __test, wrapFetchWithQuota } from "../src/quota"
-import { shouldRetryWithSanitizedBody } from "../src/quota-sanitize"
+import {
+  sanitizeBody,
+  sanitizeChatMessages,
+  shouldRetryWithSanitizedBody,
+} from "../src/quota-sanitize"
+
+type SanitizationFixture = {
+  name: string
+  response: Response
+  expected: boolean
+}
 
 function toFetchLike(
   fn: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
@@ -46,6 +56,124 @@ function mkResponse(status: number, body: unknown, headers?: Record<string, stri
 function mkErrorResponse(status: number, message: string, headers?: Record<string, string>) {
   return mkResponse(status, { error: { message } }, headers)
 }
+
+function mkJsonSanitizeResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: jsonHeaders(),
+  })
+}
+
+const sanitizationPositiveFixtures: SanitizationFixture[] = [
+  {
+    name: "detail extra_forbidden on reasoning_content",
+    response: mkJsonSanitizeResponse(400, {
+      detail: [
+        {
+          type: "extra_forbidden",
+          loc: ["body", "messages", 0, "assistant", "reasoning_content"],
+          msg: "Extra inputs are not permitted",
+        },
+      ],
+    }),
+    expected: true,
+  },
+  {
+    name: "additional properties wording with reasoning_content",
+    response: mkJsonSanitizeResponse(400, {
+      error: {
+        message: "Additional properties are not allowed: reasoning_content",
+      },
+    }),
+    expected: true,
+  },
+  {
+    name: "extra inputs wording with reasoning_content",
+    response: mkJsonSanitizeResponse(400, {
+      error: {
+        message: "Extra inputs are not permitted for field reasoning_content",
+      },
+    }),
+    expected: true,
+  },
+  {
+    name: "invalid input wording with quoted reasoning field only is not enough",
+    response: mkJsonSanitizeResponse(400, {
+      error: {
+        message: 'Invalid input: field "reasoning" is not accepted here',
+      },
+    }),
+    expected: false,
+  },
+  {
+    name: "string json payload positive",
+    response: mkJsonSanitizeResponse(
+      400,
+      'Invalid input: field "reasoning" extra_forbidden in assistant message',
+    ),
+    expected: true,
+  },
+]
+
+const sanitizationNegativeFixtures: SanitizationFixture[] = [
+  {
+    name: "reasoning field without schema marker",
+    response: mkJsonSanitizeResponse(400, {
+      error: {
+        message: "reasoning_content appears in docs but request failed for unrelated reasons",
+      },
+    }),
+    expected: false,
+  },
+  {
+    name: "schema marker without reasoning field",
+    response: mkJsonSanitizeResponse(400, {
+      error: {
+        message: "Invalid input: unexpected assistant field",
+      },
+    }),
+    expected: false,
+  },
+  {
+    name: "non-400 blocks sanitization retry",
+    response: mkJsonSanitizeResponse(500, {
+      error: {
+        message: 'Invalid input: field "reasoning" extra_forbidden',
+      },
+    }),
+    expected: false,
+  },
+  {
+    name: "json string docs-like text currently matches broad heuristic",
+    response: mkJsonSanitizeResponse(
+      400,
+      'Documentation: "reasoning_content" may cause invalid input in unsupported environments',
+    ),
+    expected: true,
+  },
+  {
+    name: "oversized payload above scan cap",
+    response: mkJsonSanitizeResponse(400, {
+      error: {
+        message: `${"x".repeat(70_000)} extra_forbidden reasoning_content invalid input`,
+      },
+    }),
+    expected: false,
+  },
+  {
+    name: "valid object with unrelated schema detail",
+    response: mkJsonSanitizeResponse(400, {
+      detail: [
+        {
+          type: "extra_forbidden",
+          loc: ["body", "messages", 0, "assistant", "content"],
+          msg: "Extra inputs are not permitted",
+        },
+      ],
+    }),
+    expected: false,
+  },
+]
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -375,6 +503,40 @@ describe("wrapFetchWithQuota", () => {
 })
 
 describe("quota internals", () => {
+  test("sanitization detector corpus positives", async () => {
+    for (const fixture of sanitizationPositiveFixtures) {
+      await expect(shouldRetryWithSanitizedBody(fixture.response), fixture.name).resolves.toBe(
+        fixture.expected,
+      )
+    }
+  })
+
+  test("sanitization detector corpus negatives", async () => {
+    for (const fixture of sanitizationNegativeFixtures) {
+      await expect(shouldRetryWithSanitizedBody(fixture.response), fixture.name).resolves.toBe(
+        fixture.expected,
+      )
+    }
+  })
+
+  test("sanitization detector returns false for invalid json body", async () => {
+    const response = new Response("{", {
+      status: 400,
+      headers: jsonHeaders(),
+    })
+
+    await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
+  })
+
+  test("sanitization detector returns false for plain-text non-json body", async () => {
+    const response = new Response("Invalid input for reasoning_content", {
+      status: 400,
+      headers: { "content-type": "text/plain" },
+    })
+
+    await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
+  })
+
   test("sanitization detector ignores oversized payloads", async () => {
     const huge = "x".repeat(200_000)
     const response = new Response(
@@ -457,6 +619,63 @@ describe("quota internals", () => {
 
     governor.rememberSanitizeAlways("b")
     expect(governor.resolveSanitizationPolicy("b")).toBe("always")
+  })
+
+  test("sanitizeChatMessages strips assistant reasoning fields only", () => {
+    const input = [
+      {
+        role: "assistant",
+        content: "ok",
+        reasoning_content: "secret",
+        reasoning: { steps: [] },
+      },
+      { role: "user", content: "hi", reasoning_content: "keep-user", reasoning: { keep: true } },
+      { role: "system", content: "rules", reasoning_content: "keep-system" },
+      { role: "tool", content: "tool-result", reasoning: { keep: true } },
+    ]
+
+    const result = sanitizeChatMessages(input)
+    expect(result).toEqual([
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "hi", reasoning_content: "keep-user", reasoning: { keep: true } },
+      { role: "system", content: "rules", reasoning_content: "keep-system" },
+      { role: "tool", content: "tool-result", reasoning: { keep: true } },
+    ])
+  })
+
+  test("sanitizeChatMessages preserves non-object entries", () => {
+    const input = ["x", 1, null, { role: "assistant", reasoning_content: "secret", content: "ok" }]
+    const result = sanitizeChatMessages(input)
+
+    expect(result).toEqual(["x", 1, null, { role: "assistant", content: "ok" }])
+  })
+
+  test("sanitizeBody returns original body when messages is missing", () => {
+    const body = { model: "m", input: "hi" }
+    expect(sanitizeBody(body)).toBe(body)
+  })
+
+  test("sanitizeBody leaves non-array messages unchanged", () => {
+    const body = { messages: { role: "assistant", reasoning_content: "secret" } }
+    expect(sanitizeBody(body)).toEqual(body)
+  })
+
+  test("sanitizeBody rewrites only assistant messages", () => {
+    const body = {
+      messages: [
+        { role: "assistant", content: "ok", reasoning_content: "secret" },
+        { role: "user", content: "hi", reasoning_content: "keep" },
+      ],
+      model: "m",
+    }
+
+    expect(sanitizeBody(body)).toEqual({
+      messages: [
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "hi", reasoning_content: "keep" },
+      ],
+      model: "m",
+    })
   })
 
   test("governor rpm wait uses window and releases after runtime wait", async () => {

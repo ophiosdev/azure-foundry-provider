@@ -523,6 +523,77 @@ describe("createAzureFoundryProvider", () => {
     expect(calls[1]?.url).toContain("/responses")
   })
 
+  test("structured mismatch target triggers fallback to responses", async () => {
+    const calls: Request[] = []
+    let count = 0
+
+    const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(new Request(input, init))
+      count += 1
+
+      if (count === 1) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              error: {
+                code: "operation_not_supported",
+                target: "/chat/completions",
+              },
+            },
+          }),
+          {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          },
+        )
+      }
+
+      return new Response(
+        JSON.stringify({
+          id: "r-target",
+          created_at: 1,
+          model: "gpt-5.3-codex",
+          output: [
+            {
+              type: "message",
+              id: "m-target",
+              role: "assistant",
+              content: [{ type: "output_text", text: "ok", annotations: [] }],
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      )
+    }
+
+    const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    const result = await provider.languageModel("gpt-5.3-codex").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      maxOutputTokens: 32,
+    })
+
+    expect(result.content[0]?.type).toBe("text")
+    expect(calls.length).toBe(2)
+    expect(calls[0]?.url).toContain("/chat/completions")
+    expect(calls[1]?.url).toContain("/responses")
+  })
+
   test("operation_not_supported without chat context does not fallback", async () => {
     let count = 0
     const fetchBase = async () => {
@@ -565,6 +636,73 @@ describe("createAzureFoundryProvider", () => {
     ).rejects.toThrow()
 
     expect(count).toBe(1)
+  })
+
+  test("docs-like advisory text currently triggers fallback via broad heuristic", async () => {
+    const calls: Request[] = []
+    let count = 0
+    const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(new Request(input, init))
+      count += 1
+      if (count === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: "See docs: chat completions is not supported in this example configuration",
+            },
+          }),
+          {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          },
+        )
+      }
+
+      return new Response(
+        JSON.stringify({
+          id: "r-docs",
+          created_at: 1,
+          model: "gpt-5.3-codex",
+          output: [
+            {
+              type: "message",
+              id: "m-docs",
+              role: "assistant",
+              content: [{ type: "output_text", text: "ok", annotations: [] }],
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      )
+    }
+    const fetchFn = Object.assign(fetchBase, {
+      preconnect: fetch.preconnect,
+    }) as typeof fetch
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    const result = await provider.languageModel("gpt-5.3-codex").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      maxOutputTokens: 32,
+    })
+
+    expect(result.content[0]?.type).toBe("text")
+    expect(count).toBe(2)
+    expect(calls[0]?.url).toContain("/chat/completions")
+    expect(calls[1]?.url).toContain("/responses")
   })
 
   test("generic 400 with large responseBody does not fallback", async () => {

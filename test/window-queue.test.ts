@@ -45,4 +45,87 @@ describe("phase 2 window queue behavior", () => {
     expect(state.requestsLength).toBeLessThanOrEqual(1)
     expect(state.tokensLength).toBeLessThanOrEqual(1)
   })
+
+  test("prunes and compacts large request and token histories after window expiry", async () => {
+    let now = 0
+
+    const governor = __test.createGovernor(
+      {
+        quota: {
+          default: {
+            rpm: 5000,
+            tpm: 500000,
+          },
+        },
+      },
+      {
+        now: () => now,
+        wait: async () => {},
+        windowMs: 100,
+      },
+    )
+
+    for (let i = 0; i < 1200; i += 1) {
+      now = Math.floor(i / 20)
+      const release = await governor.acquire("m", 5)
+      release()
+    }
+
+    let state = __test.debugWindowState(governor, "m")
+    expect(state).toBeDefined()
+    if (!state) throw new Error("missing window state")
+    expect(state.requestsLength).toBeGreaterThan(1000)
+    expect(state.tokensLength).toBeGreaterThan(1000)
+
+    now = 2000
+    const releaseFinal = await governor.acquire("m", 5)
+    releaseFinal()
+
+    state = __test.debugWindowState(governor, "m")
+    expect(state).toBeDefined()
+    if (!state) throw new Error("missing window state after prune")
+
+    expect(state.requestsLength).toBeLessThanOrEqual(1)
+    expect(state.tokensLength).toBeLessThanOrEqual(1)
+    expect(state.tokenSum).toBe(5)
+  })
+
+  test("rolling token sum stays correct across large prune boundaries", async () => {
+    let now = 0
+
+    const governor = __test.createGovernor(
+      {
+        quota: {
+          default: { tpm: 100000 },
+        },
+      },
+      {
+        now: () => now,
+        wait: async () => {},
+        windowMs: 100,
+      },
+    )
+
+    for (let i = 0; i < 200; i += 1) {
+      now = Math.floor(i / 3)
+      const tokens = (i % 3) + 1
+      const release = await governor.acquire("m", tokens)
+      release()
+    }
+
+    now = 260
+    let release = await governor.acquire("m", 7)
+    release()
+
+    now = 270
+    release = await governor.acquire("m", 11)
+    release()
+
+    const state = __test.debugWindowState(governor, "m")
+    expect(state).toBeDefined()
+    if (!state) throw new Error("missing window state")
+
+    expect(state.tokensLength).toBe(2)
+    expect(state.tokenSum).toBe(18)
+  })
 })

@@ -6,6 +6,214 @@
 import { describe, expect, test } from "bun:test"
 import { __test } from "../src/provider"
 
+type MismatchFixture = {
+  name: string
+  error: unknown
+  expected: boolean
+}
+
+const mismatchPositiveFixtures: MismatchFixture[] = [
+  {
+    name: "top-level message with chatCompletion does not work",
+    error: {
+      status: 400,
+      message: "The chatCompletion operation does not work with the specified model",
+    },
+    expected: true,
+  },
+  {
+    name: "nested error message with chat completions not supported",
+    error: {
+      status: 400,
+      error: {
+        message: "chat completions operation not supported for this model",
+      },
+    },
+    expected: true,
+  },
+  {
+    name: "structured target carries chat path",
+    error: {
+      status: 400,
+      data: {
+        error: {
+          code: "operation_not_supported",
+          target: "/chat/completions",
+        },
+      },
+    },
+    expected: true,
+  },
+  {
+    name: "structured param carries chat token",
+    error: {
+      status: 400,
+      data: {
+        error: {
+          code: "operation_not_supported",
+          param: "chat_completions",
+        },
+      },
+    },
+    expected: true,
+  },
+  {
+    name: "structured path carries chat path",
+    error: {
+      status: 400,
+      detail: [
+        {
+          code: "operation_not_supported",
+          path: "/chat/completions",
+        },
+      ],
+    },
+    expected: true,
+  },
+  {
+    name: "structured loc carries chat path token",
+    error: {
+      status: 400,
+      detail: [
+        {
+          code: "operation_not_supported",
+          loc: ["body", "/chat/completions"],
+        },
+      ],
+    },
+    expected: true,
+  },
+  {
+    name: "statusCode path is accepted",
+    error: {
+      statusCode: 400,
+      data: {
+        error: {
+          code: "operation_not_supported",
+          operation: "/chat/completions",
+        },
+      },
+    },
+    expected: true,
+  },
+  {
+    name: "response.status path is accepted",
+    error: {
+      response: { status: 400 },
+      data: {
+        error: {
+          code: "operation_not_supported",
+          operation: "/chat/completions",
+        },
+      },
+    },
+    expected: true,
+  },
+  {
+    name: "small responseBody json object positive",
+    error: {
+      status: 400,
+      responseBody: JSON.stringify({
+        error: {
+          code: "operation_not_supported",
+          message: "chat completions operation not supported",
+        },
+      }),
+    },
+    expected: true,
+  },
+  {
+    name: "invalid json responseBody still matches plain-text heuristic",
+    error: {
+      status: 400,
+      responseBody:
+        '{"error":{"message":"The chatCompletion operation does not work with the specified model"}',
+    },
+    expected: true,
+  },
+]
+
+const mismatchNegativeFixtures: MismatchFixture[] = [
+  {
+    name: "operation_not_supported for responses only",
+    error: {
+      status: 400,
+      data: {
+        error: {
+          code: "operation_not_supported",
+          operation: "/responses",
+        },
+      },
+    },
+    expected: false,
+  },
+  {
+    name: "unsupported wording without chat context",
+    error: {
+      status: 400,
+      message: "This operation is not supported for the selected deployment",
+    },
+    expected: false,
+  },
+  {
+    name: "chat context without unsupported wording",
+    error: {
+      status: 400,
+      message: "chat completions request received",
+    },
+    expected: false,
+  },
+  {
+    name: "content filter is always excluded",
+    error: {
+      status: 400,
+      message: "content_filter and chatCompletion operation does not work",
+    },
+    expected: false,
+  },
+  {
+    name: "non-400 status blocks mismatch detection",
+    error: {
+      status: 500,
+      message: "The chatCompletion operation does not work with the specified model",
+    },
+    expected: false,
+  },
+  {
+    name: "structured unsupported code without chat context",
+    error: {
+      status: 400,
+      detail: [
+        {
+          code: "operation_not_supported",
+          loc: ["body", "messages", 0],
+        },
+      ],
+    },
+    expected: false,
+  },
+  {
+    name: "valid json array responseBody still matches plain-text heuristic",
+    error: {
+      status: 400,
+      responseBody: JSON.stringify([
+        {
+          message: "chat completions operation not supported",
+        },
+      ]),
+    },
+    expected: true,
+  },
+  {
+    name: "docs-like advisory text currently matches broad text heuristic",
+    error: {
+      status: 400,
+      message: "See docs: chat completions is not supported in this example configuration",
+    },
+    expected: true,
+  },
+]
+
 describe("provider internals", () => {
   test("getValidationMode prefers divergent model mode over global", () => {
     expect(__test.getValidationMode({ apiMode: "chat" })).toBe("chat")
@@ -216,6 +424,22 @@ describe("provider internals", () => {
     expect(__test.isChatOperationMismatchError({ status: 400, message: "content_filter" })).toBe(
       false,
     )
+  })
+
+  test("chat operation mismatch corpus positives", () => {
+    for (const fixture of mismatchPositiveFixtures) {
+      expect(__test.isChatOperationMismatchError(fixture.error), fixture.name).toBe(
+        fixture.expected,
+      )
+    }
+  })
+
+  test("chat operation mismatch corpus negatives", () => {
+    for (const fixture of mismatchNegativeFixtures) {
+      expect(__test.isChatOperationMismatchError(fixture.error), fixture.name).toBe(
+        fixture.expected,
+      )
+    }
   })
 
   test("responses fallback guard handles mode and URL cases", () => {

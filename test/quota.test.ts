@@ -678,6 +678,65 @@ describe("quota internals", () => {
     })
   })
 
+  test("abort during retry wait rejects promptly", async () => {
+    const controller = new AbortController()
+    let attempts = 0
+
+    const fetchBase = async () => {
+      attempts += 1
+      return new Response(JSON.stringify({ error: { message: "temporary" } }), {
+        status: 500,
+        headers: jsonHeaders(),
+      })
+    }
+
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: {
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 1000,
+          maxDelayMs: 1000,
+          jitterRatio: 0,
+        },
+      },
+    })
+
+    const pending = wrapped("https://example.com", {
+      method: "POST",
+      body: makeBody(),
+      signal: controller.signal,
+    })
+
+    controller.abort()
+
+    await expect(pending).rejects.toThrow("aborted")
+    expect(attempts).toBe(1)
+  })
+
+  test("non-abort thrown fetch error is rethrown without abort handling", async () => {
+    const fetchBase = async () => {
+      throw new Error("boom")
+    }
+
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: {
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 1,
+          maxDelayMs: 1,
+          jitterRatio: 0,
+        },
+      },
+    })
+
+    await expect(
+      wrapped("https://example.com", {
+        method: "POST",
+        body: makeBody(),
+      }),
+    ).rejects.toThrow("boom")
+  })
+
   test("governor rpm wait uses window and releases after runtime wait", async () => {
     let now = 0
     const waits: number[] = []

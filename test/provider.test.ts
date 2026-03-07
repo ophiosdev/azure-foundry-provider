@@ -972,6 +972,125 @@ describe("createAzureFoundryProvider", () => {
     expect(count).toBe(1)
   })
 
+  test("onFallback fires with expected payload on doGenerate fallback", async () => {
+    const events: unknown[] = []
+    let count = 0
+
+    const fetchBase = async () => {
+      count += 1
+      if (count === 1) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              error: {
+                code: "operation_not_supported",
+                target: "/chat/completions",
+              },
+            },
+          }),
+          {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          },
+        )
+      }
+
+      return mkResponsesOkResponse("gpt-5.3-codex")
+    }
+
+    const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "k",
+      fetch: fetchFn,
+      onFallback: (event) => events.push(event),
+      quota: { retry: { maxAttempts: 1 } },
+    })
+
+    await provider.languageModel("gpt-5.3-codex").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      maxOutputTokens: 32,
+    })
+
+    expect(events).toEqual([
+      {
+        eventVersion: "v1",
+        phase: "fallback",
+        fromMode: "chat",
+        toMode: "responses",
+        reason: "chat_operation_mismatch",
+        modelId: "gpt-5.3-codex",
+      },
+    ])
+  })
+
+  test("onFallback fires with expected payload on doStream fallback", async () => {
+    const events: unknown[] = []
+    let count = 0
+
+    const fetchBase = async () => {
+      count += 1
+      if (count === 1) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              error: {
+                code: "operation_not_supported",
+                target: "/chat/completions",
+              },
+            },
+          }),
+          {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          },
+        )
+      }
+
+      return new Response(
+        JSON.stringify({
+          id: "r-stream-fallback",
+          created_at: 1,
+          model: "gpt-5.3-codex",
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      )
+    }
+
+    const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "k",
+      fetch: fetchFn,
+      onFallback: (event) => events.push(event),
+      quota: { retry: { maxAttempts: 1 } },
+    })
+
+    const result = await provider.languageModel("gpt-5.3-codex").doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      maxOutputTokens: 32,
+    })
+
+    expect(result).toBeDefined()
+    expect(events).toEqual([
+      {
+        eventVersion: "v1",
+        phase: "fallback",
+        fromMode: "chat",
+        toMode: "responses",
+        reason: "chat_operation_mismatch",
+        modelId: "gpt-5.3-codex",
+      },
+    ])
+  })
+
   test("explicit auth header skips api-key loading", async () => {
     const calls: Array<Request> = []
     const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {

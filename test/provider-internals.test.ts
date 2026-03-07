@@ -442,6 +442,37 @@ describe("provider internals", () => {
     }
   })
 
+  test("mismatch detector reads message text from data.detail entries", () => {
+    const mismatch = __test.isChatOperationMismatchError({
+      status: 400,
+      data: {
+        detail: [
+          {
+            message: "The chatCompletion operation does not work with the specified model",
+          },
+        ],
+      },
+    })
+
+    expect(mismatch).toBe(true)
+  })
+
+  test("mismatch detector reads msg and type text from data.detail entries", () => {
+    const mismatch = __test.isChatOperationMismatchError({
+      status: 400,
+      data: {
+        detail: [
+          {
+            msg: "chat completions operation not supported for this deployment",
+            type: "operation_not_supported",
+          },
+        ],
+      },
+    })
+
+    expect(mismatch).toBe(true)
+  })
+
   test("responses fallback guard handles mode and URL cases", () => {
     expect(
       __test.shouldTryResponsesFallback("https://x/openai/v1/chat/completions", "chat", undefined),

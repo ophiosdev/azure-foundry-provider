@@ -916,4 +916,276 @@ describe("quota internals", () => {
 
     expect(hasPolling).toBe(false)
   })
+
+  test("maxConcurrent queue is FIFO across multiple waiters", async () => {
+    let now = 0
+    const waits: number[] = []
+    const resolved: string[] = []
+
+    const governor = __test.createGovernor(
+      {
+        quota: {
+          default: { maxConcurrent: 1 },
+        },
+      },
+      {
+        now: () => now,
+        wait: async (ms: number) => {
+          waits.push(ms)
+          now += ms
+        },
+        windowMs: 100,
+      },
+    )
+
+    const releaseA = await governor.acquire("m", 1)
+
+    const acquireLabeled = async (label: string) => {
+      const release = await governor.acquire("m", 1)
+      resolved.push(label)
+      return release
+    }
+
+    const bPromise = acquireLabeled("B")
+    const cPromise = acquireLabeled("C")
+    const dPromise = acquireLabeled("D")
+
+    await Promise.resolve()
+    expect(resolved).toEqual([])
+
+    releaseA()
+
+    const releaseB = await bPromise
+    expect(resolved).toEqual(["B"])
+
+    releaseB()
+    const releaseC = await cPromise
+    expect(resolved).toEqual(["B", "C"])
+
+    releaseC()
+    const releaseD = await dPromise
+    expect(resolved).toEqual(["B", "C", "D"])
+
+    releaseD()
+
+    expect(waits).toEqual([])
+  })
+
+  test("new acquire cannot barge ahead of already queued waiters", async () => {
+    const now = 0
+    const resolved: string[] = []
+
+    const governor = __test.createGovernor(
+      {
+        quota: {
+          default: { maxConcurrent: 1 },
+        },
+      },
+      {
+        now: () => now,
+        wait: async () => {},
+        windowMs: 100,
+      },
+    )
+
+    const releaseA = await governor.acquire("m", 1)
+
+    const acquireLabeled = async (label: string) => {
+      const release = await governor.acquire("m", 1)
+      resolved.push(label)
+      return release
+    }
+
+    const bPromise = acquireLabeled("B")
+    const cPromise = acquireLabeled("C")
+
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(resolved).toEqual([])
+
+    releaseA()
+
+    const releaseB = await bPromise
+    expect(resolved).toEqual(["B"])
+
+    const a2Promise = acquireLabeled("A2")
+    releaseB()
+
+    const releaseC = await cPromise
+    expect(resolved).toEqual(["B", "C"])
+    releaseC()
+
+    const releaseA2 = await a2Promise
+    expect(resolved).toEqual(["B", "C", "A2"])
+    releaseA2()
+  })
+
+  test("aborted waiters are removed without disturbing surviving waiter order", async () => {
+    let now = 0
+    const waits: number[] = []
+    const resolved: string[] = []
+
+    const governor = __test.createGovernor(
+      {
+        quota: {
+          default: { maxConcurrent: 1 },
+        },
+      },
+      {
+        now: () => now,
+        wait: async (ms: number) => {
+          waits.push(ms)
+          now += ms
+        },
+        windowMs: 100,
+      },
+    )
+
+    const releaseA = await governor.acquire("m", 1)
+
+    const acquireLabeled = async (label: string, signal?: AbortSignal) => {
+      const release = await governor.acquire("m", 1, signal)
+      resolved.push(label)
+      return release
+    }
+
+    const bController = new AbortController()
+    const cController = new AbortController()
+    const dController = new AbortController()
+    const eController = new AbortController()
+
+    const bPromise = acquireLabeled("B", bController.signal)
+    const cPromise = acquireLabeled("C", cController.signal)
+    const dPromise = acquireLabeled("D", dController.signal)
+    const ePromise = acquireLabeled("E", eController.signal)
+
+    await Promise.resolve()
+    expect(resolved).toEqual([])
+
+    const cHandled = cPromise.catch((error: unknown) => error)
+    const dHandled = dPromise.catch((error: unknown) => error)
+
+    cController.abort()
+    dController.abort()
+
+    await expect(cHandled).resolves.toBeInstanceOf(DOMException)
+    await expect(dHandled).resolves.toBeInstanceOf(DOMException)
+
+    releaseA()
+
+    const releaseB = await bPromise
+    expect(resolved).toEqual(["B"])
+    releaseB()
+
+    const releaseE = await ePromise
+    expect(resolved).toEqual(["B", "E"])
+    releaseE()
+
+    expect(waits).toEqual([])
+  })
+
+  test("repeated abort churn does not poison subsequent waiter processing", async () => {
+    const now = 0
+    const resolved: string[] = []
+
+    const governor = __test.createGovernor(
+      {
+        quota: {
+          default: { maxConcurrent: 1 },
+        },
+      },
+      {
+        now: () => now,
+        wait: async () => {},
+        windowMs: 100,
+      },
+    )
+
+    const releaseA = await governor.acquire("m", 1)
+
+    const controllers = Array.from({ length: 8 }, () => new AbortController())
+
+    const acquireLabeled = async (label: string, signal: AbortSignal) => {
+      const release = await governor.acquire("m", 1, signal)
+      resolved.push(label)
+      return release
+    }
+
+    const promises = controllers.map((controller, index) =>
+      acquireLabeled(`W${String(index)}`, controller.signal),
+    )
+
+    await Promise.resolve()
+    expect(resolved).toEqual([])
+
+    const abortedIndexes = [1, 3, 5, 7] as const
+    const handledAborts = abortedIndexes.map((index) =>
+      promises[index]!.catch((error: unknown) => error),
+    )
+
+    controllers[1]?.abort()
+    controllers[3]?.abort()
+    controllers[5]?.abort()
+    controllers[7]?.abort()
+
+    for (const handled of handledAborts) {
+      await expect(handled).resolves.toBeInstanceOf(DOMException)
+    }
+
+    releaseA()
+
+    const survivingIndexes = [0, 2, 4, 6]
+    for (const index of survivingIndexes) {
+      const promise = promises[index]
+      if (!promise) throw new Error("missing surviving waiter promise")
+      const release = await promise
+      release()
+    }
+
+    expect(resolved).toEqual(["W0", "W2", "W4", "W6"])
+  })
+
+  test("sweep evicts stale windows while preserving recent and active ones", async () => {
+    let now = 0
+
+    const governor = __test.createGovernor(
+      {
+        quota: {
+          default: { rpm: 1000 },
+        },
+      },
+      {
+        now: () => now,
+        wait: async () => {},
+        windowMs: 100,
+      },
+    )
+
+    for (let i = 0; i < 40; i += 1) {
+      now = Math.floor(i / 4)
+      const release = await governor.acquire(`stale-${String(i)}`, 1)
+      release()
+    }
+
+    now = 180
+    const releaseRecent = await governor.acquire("recent-model", 1)
+    releaseRecent()
+
+    now = 190
+    const releaseActive = await governor.acquire("active-model", 1)
+
+    expect(governor.windowCount()).toBe(2)
+
+    now = 250
+    const releaseTrigger = await governor.acquire("trigger-model", 1)
+    releaseTrigger()
+
+    expect(governor.windowCount()).toBe(3)
+    expect(__test.debugWindowState(governor, "active-model")).toBeDefined()
+    expect(__test.debugWindowState(governor, "recent-model")).toBeDefined()
+    expect(__test.debugWindowState(governor, "trigger-model")).toBeDefined()
+    expect(__test.debugWindowState(governor, "stale-0")).toBeUndefined()
+
+    releaseActive()
+  })
 })

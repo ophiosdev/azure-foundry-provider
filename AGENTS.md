@@ -28,6 +28,7 @@ Primary layout:
 `AGENTS.md` is the committed operational guide for coding agents in this repository.
 
 - `README.md` is the user-facing source of truth for public behavior and examples.
+- `CHANGELOG.md` is the release-facing source of truth for shipped behavior and release summaries.
 - Temporary planning or evidence files may exist locally during active work, but contributors must not depend on them being committed.
 
 ## Key files
@@ -146,6 +147,40 @@ When implementing a change:
 3. Keep docs (`README.md`) in sync for any user-visible behavior.
 4. Prefer small, deterministic changes over broad refactors.
 5. Prefer test-only hardening first when tightening heuristics or invariants; change runtime code only when a failing test reveals an intended behavioral gap.
+
+## Changelog guidance
+
+When preparing or updating `CHANGELOG.md`, follow a local-first variant of the changelog automation workflow from [`antigravity-awesome-skills/skills/changelog-automation`](https://github.com/sickn33/antigravity-awesome-skills/skills/changelog-automation):
+
+- Use Keep a Changelog structure:
+  - `# Changelog`
+  - `## [Unreleased]`
+  - dated version sections like `## [0.2.0] - 2026-03-08`
+- Write concise, human-readable bullets grouped under standard sections when applicable:
+  - `Added`
+  - `Changed`
+  - `Deprecated`
+  - `Removed`
+  - `Fixed`
+  - `Security`
+- Prefer meaningful release notes over raw commit dumps.
+- Use local git history as the source of truth; do not depend on GitHub APIs or remote metadata.
+- Derive release notes primarily from commit history on the current branch, then refine wording to reflect actual shipped behavior.
+
+### Branch version bump rule
+
+When creating a changelog entry for the current branch, determine the next version from commit messages on the branch using Conventional Commits in this order:
+
+1. If any commit message on the current branch has an exclamation mark on the type (for example `feat!:` or `fix!:`), treat it as a breaking change and bump to `(major + 1).0.0`. Stop analysis immediately once this condition is found.
+2. Otherwise, if any commit message on the current branch has type `feat`, bump to `minor + 1`.
+3. Otherwise, bump `patch + 1`.
+
+### Changelog workflow expectations
+
+- Inspect commits since the last release tag when one exists.
+- Map commit intent into changelog sections rather than mirroring commit types one-to-one.
+- Exclude low-signal noise unless it materially affects users or release consumers.
+- Keep changelog entries consistent with `README.md`, exported behavior, and actual validated code state.
 
 ## Non-negotiable engineering rules
 

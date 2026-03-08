@@ -263,106 +263,11 @@ describe("createAzureFoundryProvider", () => {
     )
   })
 
-  test("v1 chat endpoint falls back to responses when chat operation unsupported", async () => {
-    const calls: Array<Request> = []
-    let count = 0
-
-    const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
-      calls.push(new Request(input, init))
-      count += 1
-
-      if (count === 1) {
-        return new Response(
-          JSON.stringify({
-            error: {
-              message:
-                "The chatCompletion operation does not work with the specified model, gpt-5.3-codex. Please choose different model and try again.",
-            },
-          }),
-          {
-            status: 400,
-            headers: { "content-type": "application/json" },
-          },
-        )
-      }
-
-      return new Response(
-        JSON.stringify({
-          id: "r1",
-          created_at: 1,
-          model: "gpt-5.3-codex",
-          output: [
-            {
-              type: "message",
-              id: "m1",
-              role: "assistant",
-              content: [
-                {
-                  type: "output_text",
-                  text: "ok",
-                  annotations: [],
-                },
-              ],
-            },
-          ],
-          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-        }),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      )
-    }
-    const fetchFn = Object.assign(fetchBase, {
-      preconnect: fetch.preconnect,
-    }) as typeof fetch
+  test("global chat mode falls back to responses on operation mismatch", async () => {
+    const { calls, fetchFn } = mkFetchSequence([mkChatMismatchResponse(), mkResponsesOkResponse()])
 
     const provider = createAzureFoundryProvider({
-      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
-      apiKey: "k",
-      fetch: fetchFn,
-      quota: {
-        retry: {
-          maxAttempts: 1,
-        },
-      },
-    })
-
-    const model = provider.languageModel("gpt-5.3-codex")
-    const result = await model.doGenerate({
-      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-      maxOutputTokens: 32,
-    })
-
-    expect(result.content[0]?.type).toBe("text")
-    expect(calls.length).toBe(2)
-    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/chat/completions")
-    expect(calls[1]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
-  })
-
-  test("explicit chat apiMode does not use fallback", async () => {
-    let count = 0
-    const fetchBase = async () => {
-      count += 1
-      return new Response(
-        JSON.stringify({
-          error: {
-            message:
-              "The chatCompletion operation does not work with the specified model, gpt-5.3-codex. Please choose different model and try again.",
-          },
-        }),
-        {
-          status: 400,
-          headers: { "content-type": "application/json" },
-        },
-      )
-    }
-    const fetchFn = Object.assign(fetchBase, {
-      preconnect: fetch.preconnect,
-    }) as typeof fetch
-
-    const provider = createAzureFoundryProvider({
-      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      endpoint: "https://foo.openai.azure.com/openai/v1",
       apiMode: "chat",
       apiKey: "k",
       fetch: fetchFn,
@@ -373,13 +278,171 @@ describe("createAzureFoundryProvider", () => {
       },
     })
 
+    const result = await provider.languageModel("gpt-5.3-codex").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      maxOutputTokens: 32,
+    })
+
+    expect(result.content[0]?.type).toBe("text")
+    expect(calls.length).toBe(2)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/chat/completions")
+    expect(calls[1]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
+  })
+
+  test("global responses mode falls back to chat on operation mismatch", async () => {
+    const { calls, fetchFn } = mkFetchSequence([
+      mkJsonResponse(400, {
+        error: {
+          message: "The responses operation does not work with the specified model",
+        },
+      }),
+      mkChatOkResponse("gpt-4.1"),
+    ])
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1",
+      apiMode: "responses",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    const result = await provider.languageModel("gpt-4.1").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      maxOutputTokens: 32,
+    })
+
+    expect(result.content[0]?.type).toBe("text")
+    expect(calls.length).toBe(2)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
+    expect(calls[1]!.url).toBe("https://foo.openai.azure.com/openai/v1/chat/completions")
+  })
+
+  test("inferred chat mode falls back to responses on operation mismatch", async () => {
+    const { calls, fetchFn } = mkFetchSequence([mkChatMismatchResponse(), mkResponsesOkResponse()])
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    const result = await provider.languageModel("gpt-5.3-codex").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      maxOutputTokens: 32,
+    })
+
+    expect(result.content[0]?.type).toBe("text")
+    expect(calls.length).toBe(2)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/chat/completions")
+    expect(calls[1]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
+  })
+
+  test("inferred responses mode falls back to chat on operation mismatch", async () => {
+    const { calls, fetchFn } = mkFetchSequence([
+      mkJsonResponse(400, {
+        error: {
+          message: "The responses operation does not work with the specified model",
+        },
+      }),
+      mkChatOkResponse("gpt-4.1"),
+    ])
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/responses",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    const result = await provider.languageModel("gpt-4.1").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      maxOutputTokens: 32,
+    })
+
+    expect(result.content[0]?.type).toBe("text")
+    expect(calls.length).toBe(2)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
+    expect(calls[1]!.url).toBe("https://foo.openai.azure.com/openai/v1/chat/completions")
+  })
+
+  test("per-model explicit chat mode does not fallback", async () => {
+    const { calls, fetchFn } = mkFetchSequence([mkChatMismatchResponse()])
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1",
+      apiMode: "responses",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+      modelOptions: {
+        "gpt-5.3-codex": {
+          apiMode: "chat",
+        },
+      },
+    })
+
     await expect(
       provider.languageModel("gpt-5.3-codex").doGenerate({
         prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
       }),
     ).rejects.toThrow("chatCompletion operation")
 
-    expect(count).toBe(1)
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/chat/completions")
+  })
+
+  test("per-model explicit responses mode does not fallback", async () => {
+    const { calls, fetchFn } = mkFetchSequence([
+      mkJsonResponse(400, {
+        error: {
+          message: "The responses operation does not work with the specified model",
+        },
+      }),
+    ])
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1",
+      apiMode: "chat",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+      modelOptions: {
+        "gpt-4.1": {
+          apiMode: "responses",
+        },
+      },
+    })
+
+    await expect(
+      provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      }),
+    ).rejects.toThrow("responses operation")
+
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
   })
 
   test("structured mismatch payload triggers fallback to responses", async () => {
@@ -638,7 +701,7 @@ describe("createAzureFoundryProvider", () => {
     expect(count).toBe(1)
   })
 
-  test("docs-like advisory text currently triggers fallback via broad heuristic", async () => {
+  test("generic 400 validation error does not trigger fallback", async () => {
     const calls: Request[] = []
     let count = 0
     const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -648,7 +711,7 @@ describe("createAzureFoundryProvider", () => {
         return new Response(
           JSON.stringify({
             error: {
-              message: "See docs: chat completions is not supported in this example configuration",
+              message: "Validation failed for input schema",
             },
           }),
           {
@@ -694,15 +757,15 @@ describe("createAzureFoundryProvider", () => {
       },
     })
 
-    const result = await provider.languageModel("gpt-5.3-codex").doGenerate({
-      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-      maxOutputTokens: 32,
-    })
+    await expect(
+      provider.languageModel("gpt-5.3-codex").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+        maxOutputTokens: 32,
+      }),
+    ).rejects.toThrow("Validation failed for input schema")
 
-    expect(result.content[0]?.type).toBe("text")
-    expect(count).toBe(2)
+    expect(count).toBe(1)
     expect(calls[0]?.url).toContain("/chat/completions")
-    expect(calls[1]?.url).toContain("/responses")
   })
 
   test("generic 400 with large responseBody does not fallback", async () => {
@@ -753,14 +816,21 @@ describe("createAzureFoundryProvider", () => {
       endpoint: string
       apiMode?: "chat" | "responses"
       modelApiMode?: "chat" | "responses"
+      modelId?: string
       first: Response
+      second?: Response
       expectFallback: boolean
+      expectedUrls: [string] | [string, string]
     }> = [
       {
         name: "message mismatch falls back",
         endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
         first: mkChatMismatchResponse(),
         expectFallback: true,
+        expectedUrls: [
+          "https://foo.openai.azure.com/openai/v1/chat/completions",
+          "https://foo.openai.azure.com/openai/v1/responses",
+        ],
       },
       {
         name: "structured mismatch falls back",
@@ -778,6 +848,10 @@ describe("createAzureFoundryProvider", () => {
           { status: 400, headers: { "content-type": "application/json" } },
         ),
         expectFallback: true,
+        expectedUrls: [
+          "https://foo.openai.azure.com/openai/v1/chat/completions",
+          "https://foo.openai.azure.com/openai/v1/responses",
+        ],
       },
       {
         name: "non-chat operation mismatch does not fallback",
@@ -794,28 +868,66 @@ describe("createAzureFoundryProvider", () => {
           { status: 400, headers: { "content-type": "application/json" } },
         ),
         expectFallback: false,
+        expectedUrls: ["https://foo.openai.azure.com/openai/v1/chat/completions"],
       },
       {
-        name: "explicit global chat blocks fallback",
-        endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+        name: "global chat fallback stays enabled",
+        endpoint: "https://foo.openai.azure.com/openai/v1",
         apiMode: "chat",
         first: mkChatMismatchResponse(),
-        expectFallback: false,
+        expectFallback: true,
+        expectedUrls: [
+          "https://foo.openai.azure.com/openai/v1/chat/completions",
+          "https://foo.openai.azure.com/openai/v1/responses",
+        ],
       },
       {
         name: "explicit per-model chat blocks fallback",
-        endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+        endpoint: "https://foo.openai.azure.com/openai/v1",
+        apiMode: "responses",
         modelApiMode: "chat",
         first: mkChatMismatchResponse(),
         expectFallback: false,
+        expectedUrls: ["https://foo.openai.azure.com/openai/v1/chat/completions"],
+      },
+      {
+        name: "inferred responses mismatch falls back to chat",
+        endpoint: "https://foo.openai.azure.com/openai/v1/responses",
+        modelId: "gpt-4.1",
+        first: mkJsonResponse(400, {
+          error: {
+            message: "The responses operation does not work with the specified model",
+          },
+        }),
+        second: mkChatOkResponse("gpt-4.1"),
+        expectFallback: true,
+        expectedUrls: [
+          "https://foo.openai.azure.com/openai/v1/responses",
+          "https://foo.openai.azure.com/openai/v1/chat/completions",
+        ],
+      },
+      {
+        name: "explicit per-model responses blocks fallback",
+        endpoint: "https://foo.openai.azure.com/openai/v1",
+        apiMode: "chat",
+        modelApiMode: "responses",
+        modelId: "gpt-4.1",
+        first: mkJsonResponse(400, {
+          error: {
+            message: "The responses operation does not work with the specified model",
+          },
+        }),
+        expectFallback: false,
+        expectedUrls: ["https://foo.openai.azure.com/openai/v1/responses"],
       },
     ]
 
     for (const scenario of scenarios) {
       const sequence = scenario.expectFallback
-        ? [scenario.first, mkResponsesOkResponse()]
+        ? [scenario.first, scenario.second ?? mkResponsesOkResponse(scenario.modelId)]
         : [scenario.first]
       const { calls, fetchFn } = mkFetchSequence(sequence)
+      const modelId = scenario.modelId ?? "gpt-5.3-codex"
 
       const provider = createAzureFoundryProvider({
         endpoint: scenario.endpoint,
@@ -830,7 +942,7 @@ describe("createAzureFoundryProvider", () => {
         ...(scenario.modelApiMode
           ? {
               modelOptions: {
-                "gpt-5.3-codex": {
+                [modelId]: {
                   apiMode: scenario.modelApiMode,
                 },
               },
@@ -839,7 +951,7 @@ describe("createAzureFoundryProvider", () => {
       })
 
       if (scenario.expectFallback) {
-        const result = await provider.languageModel("gpt-5.3-codex").doGenerate({
+        const result = await provider.languageModel(modelId).doGenerate({
           prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
           maxOutputTokens: 16,
         })
@@ -847,12 +959,17 @@ describe("createAzureFoundryProvider", () => {
         expect(calls.length, scenario.name).toBe(2)
       } else {
         await expect(
-          provider.languageModel("gpt-5.3-codex").doGenerate({
+          provider.languageModel(modelId).doGenerate({
             prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
           }),
         ).rejects.toThrow()
         expect(calls.length, scenario.name).toBe(1)
       }
+
+      expect(
+        calls.map((call) => call.url),
+        `${scenario.name} request sequence`,
+      ).toEqual(scenario.expectedUrls)
     }
   })
 
@@ -970,6 +1087,96 @@ describe("createAzureFoundryProvider", () => {
     ).rejects.toThrow("Some other stream error")
 
     expect(count).toBe(1)
+  })
+
+  test("chat accessor stays strict on operation mismatch", async () => {
+    const { calls, fetchFn } = mkFetchSequence([mkChatMismatchResponse(), mkResponsesOkResponse()])
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1",
+      apiMode: "chat",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    await expect(
+      provider.chat("gpt-5.3-codex").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      }),
+    ).rejects.toThrow("chatCompletion operation")
+
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/chat/completions")
+  })
+
+  test("responses accessor stays strict on operation mismatch", async () => {
+    const { calls, fetchFn } = mkFetchSequence([
+      mkJsonResponse(400, {
+        error: {
+          message: "The responses operation does not work with the specified model",
+        },
+      }),
+      mkChatOkResponse("gpt-4.1"),
+    ])
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1",
+      apiMode: "responses",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    await expect(
+      provider.responses("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      }),
+    ).rejects.toThrow("responses operation")
+
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
+  })
+
+  test("fallback retries only once across transports", async () => {
+    const { calls, fetchFn } = mkFetchSequence([
+      mkChatMismatchResponse(),
+      mkJsonResponse(400, {
+        error: {
+          message: "The responses operation does not work with the specified model",
+        },
+      }),
+      mkChatOkResponse("gpt-4.1"),
+    ])
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    await expect(
+      provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      }),
+    ).rejects.toThrow("responses operation")
+
+    expect(calls.length).toBe(2)
+    expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/chat/completions")
+    expect(calls[1]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
   })
 
   test("onFallback fires with expected payload on doGenerate fallback", async () => {

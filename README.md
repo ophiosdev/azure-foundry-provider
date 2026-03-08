@@ -14,7 +14,7 @@ The implementation features a sophisticated quota management system known as the
 
 ### Intelligent Error Recovery
 
-A standout feature of the provider is its **Chat-to-Responses fallback**. Azure's model-operation compatibility can vary; if a request is routed to a Chat endpoint but the model rejects the operation, the provider intelligently detects the specific error payload and automatically retries through the Responses transport. This recovery is carefully balanced to respect explicit developer intent, remaining disabled when a specific mode is strictly forced.
+A standout feature of the provider is its **operation-mismatch fallback for `languageModel(...)`**. Azure's model-operation compatibility can vary; when `languageModel(...)` is routed through the wrong operation because mode came from URL inference or global `apiMode`, the provider can detect a known Azure operation-mismatch error and retry exactly once through the opposite transport. This recovery stays disabled for strict transport accessors and for models with an explicit per-model `apiMode`.
 
 ### Engineered for Reliability
 
@@ -32,7 +32,7 @@ The codebase adheres to the highest standards of modern TypeScript development, 
 - Optional static quota controls (`rpm`, `tpm`, `maxConcurrent`, `maxOutputTokensCap`)
 - Adaptive throttling from Azure `x-ratelimit-*` headers
 - Request sanitization for chat history compatibility (removes assistant `reasoning_content`/`reasoning` fields)
-- Automatic chat->responses fallback for model/operation mismatch errors (when mode is not explicitly forced to chat)
+- Automatic bidirectional fallback in `languageModel(...)` for known operation-mismatch errors when mode is global or inferred
 - Optional observability callbacks (`onRetry`, `onAdaptiveCooldown`, `onSanitizedRetry`, `onFallback`)
 - Timeout support via `AbortSignal`
 
@@ -211,10 +211,10 @@ type AzureFoundryOptions = {
   - Use it to identify strict endpoints/models that should move to per-model `"always"` sanitization.
   - Event contract: `{ eventVersion: "v1", phase: "sanitized_retry", reason, sanitizedFields, status?, modelId? }`.
 - `onFallback`:
-  - Optional callback emitted when chat transport falls back to responses on operation mismatch.
-  - Use it to find models that should be explicitly configured for responses mode.
-  - Event contract: `{ eventVersion: "v1", phase: "fallback", fromMode: "chat", toMode: "responses", reason, status?, modelId? }`.
-  - Fallback guardrails are unchanged: disabled when chat mode is explicitly forced.
+  - Optional callback emitted when `languageModel(...)` falls back across transports on a known operation mismatch.
+  - Use it to find models that should be explicitly configured for their correct mode.
+  - Event contract: `{ eventVersion: "v1", phase: "fallback", fromMode: "chat" | "responses", toMode: "chat" | "responses", reason, status?, modelId? }`.
+  - Fallback remains disabled for strict transport accessors and when `modelOptions[modelId].apiMode` is explicitly set.
 - `fetch`:
   - Custom fetch implementation.
 - `name` (default `"azure-foundry"`):
@@ -239,20 +239,33 @@ Per-model mode override is also supported via `modelOptions[modelId].apiMode` an
 
 ### Operation mismatch fallback
 
-When a request is routed to chat and Azure returns a model/operation mismatch error like:
+`provider.languageModel(modelId)` can retry exactly once through the opposite transport when Azure returns a known operation-mismatch error for the attempted operation, for example:
 
 - `The chatCompletion operation does not work with the specified model ...`
+- a corresponding responses-operation rejection for `/responses`
 
-the provider can retry once through responses transport for the same model. This behavior is enabled only when chat mode is not explicitly forced:
+Fallback is allowed only when the first attempt mode came from:
 
-- fallback allowed: inferred mode or non-chat global/per-model mode context
-- fallback disabled: explicit global `apiMode: "chat"` or per-model `apiMode: "chat"`
+- URL inference
+- global `apiMode`
 
-This keeps strict explicit chat configurations deterministic while improving resilience for mixed model setups.
+Fallback is disabled when:
+
+- `modelOptions[modelId].apiMode` is explicitly set
+- you use `provider.chat(modelId)`
+- you use `provider.responses(modelId)`
+
+Guardrails:
+
+- generic `400` errors do not trigger fallback
+- fallback requires a known Azure operation-mismatch signal for the operation that was actually attempted
+- retry happens at most once and only across the opposite transport
+
+This keeps explicit per-model mode selection and transport-specific accessors deterministic while improving resilience for mixed model setups.
 
 ## Observability callbacks
 
-The provider can emit callback events for retry, adaptive cooldown, sanitization retry, and chat->responses fallback decisions.
+The provider can emit callback events for retry, adaptive cooldown, sanitization retry, and cross-transport fallback decisions.
 
 Why these callbacks exist:
 
@@ -264,12 +277,12 @@ Callbacks are optional. If you do not set them, behavior is unchanged.
 
 ### Event reference (`eventVersion: "v1"`)
 
-| Callback             | Required fields                                         | Optional fields                                   | Typical reasons                                         |
-| -------------------- | ------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------- |
-| `onRetry`            | `eventVersion`, `phase`, `attempt`, `reason`            | `status`, `retryAfterMs`, `modelId`               | `status_429`, `retryable_status`                        |
-| `onAdaptiveCooldown` | `eventVersion`, `phase`, `cooldownMs`, `reason`         | `remainingRequests`, `remainingTokens`, `modelId` | `requests_depleted`, `tokens_depleted`, `low_watermark` |
-| `onSanitizedRetry`   | `eventVersion`, `phase`, `reason`, `sanitizedFields`    | `status`, `modelId`                               | `schema_rejection`                                      |
-| `onFallback`         | `eventVersion`, `phase`, `fromMode`, `toMode`, `reason` | `status`, `modelId`                               | `chat_operation_mismatch`                               |
+| Callback             | Required fields                                         | Optional fields                                   | Typical reasons                                           |
+| -------------------- | ------------------------------------------------------- | ------------------------------------------------- | --------------------------------------------------------- |
+| `onRetry`            | `eventVersion`, `phase`, `attempt`, `reason`            | `status`, `retryAfterMs`, `modelId`               | `status_429`, `retryable_status`                          |
+| `onAdaptiveCooldown` | `eventVersion`, `phase`, `cooldownMs`, `reason`         | `remainingRequests`, `remainingTokens`, `modelId` | `requests_depleted`, `tokens_depleted`, `low_watermark`   |
+| `onSanitizedRetry`   | `eventVersion`, `phase`, `reason`, `sanitizedFields`    | `status`, `modelId`                               | `schema_rejection`                                        |
+| `onFallback`         | `eventVersion`, `phase`, `fromMode`, `toMode`, `reason` | `status`, `modelId`                               | `chat_operation_mismatch`, `responses_operation_mismatch` |
 
 ### Security and data boundaries
 
@@ -352,7 +365,7 @@ const provider = createAzureFoundryProvider({
 
 Use callbacks to turn runtime observations into explicit config:
 
-1. If `onFallback` fires repeatedly for a model, set `modelOptions[modelId].apiMode = "responses"`.
+1. If `onFallback` fires repeatedly for a model, set `modelOptions[modelId].apiMode` to the mode that model actually requires.
 2. If `onSanitizedRetry` fires repeatedly for a model, set `modelOptions[modelId].assistantReasoningSanitization = "always"`.
 3. If `onRetry` + `onAdaptiveCooldown` rates are high, tune `quota.retry` and review endpoint capacity.
 
@@ -1110,6 +1123,8 @@ const provider = createAzureFoundryProvider({
 
 This pattern is useful when a provider points to a single v1 base root but individual models must use different operations.
 
+Global `apiMode` controls the first attempt for models without a per-model override. If a model has `modelOptions[modelId].apiMode`, that per-model mode is strict for that model and disables automatic cross-transport recovery.
+
 ## Environment variables
 
 - `AZURE_FOUNDRY_ENDPOINT`: fallback for `options.endpoint`
@@ -1119,10 +1134,19 @@ This pattern is useful when a provider points to a single v1 base root but indiv
 
 ### Identifying Operation Mismatches
 
-If you see an error like `The chatCompletion operation does not work with the specified model`, it means the model you've deployed doesn't support the standard chat endpoint.
+If you see an error like `The chatCompletion operation does not work with the specified model`, the model likely does not support the chat operation.
 
-- **Fix:** Either update your `endpoint` to a `/responses` path or set `modelOptions[modelId].apiMode = "responses"`.
-- **Note:** The provider includes an automatic fallback for this error, but explicit configuration is always preferred for latency optimization.
+- **Fix:** Update your endpoint or set `modelOptions[modelId].apiMode = "responses"` for that model.
+- **Automatic recovery:** `provider.languageModel(modelId)` can retry once through responses when the initial mode came from URL inference or global `apiMode`.
+- **Strict cases:** `provider.chat(modelId)` does not fallback, and a per-model `apiMode: "chat"` also stays strict.
+
+If you see the corresponding mismatch for `/responses`, the model likely requires chat instead.
+
+- **Fix:** Update your endpoint or set `modelOptions[modelId].apiMode = "chat"` for that model.
+- **Automatic recovery:** `provider.languageModel(modelId)` can retry once through chat when the initial mode came from URL inference or global `apiMode`.
+- **Strict cases:** `provider.responses(modelId)` does not fallback, and a per-model `apiMode: "responses"` also stays strict.
+
+Generic `400 Bad Request` responses do not trigger fallback. Only known Azure operation-mismatch errors for the attempted operation qualify.
 
 ### Dealing with `400 Bad Request` and `reasoning_content`
 

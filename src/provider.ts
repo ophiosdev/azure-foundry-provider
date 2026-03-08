@@ -22,6 +22,7 @@ import {
 import { applyRequestPolicy, type ToolPolicy } from "./request"
 import { type ApiMode, parseEndpoint } from "./url"
 import {
+  detectOperationMismatch,
   extractStructuredMismatchSignals,
   isChatOperationMismatchError,
   shouldParseResponseBody,
@@ -46,8 +47,8 @@ export type AzureFoundryOptions = {
   onFallback?: (event: {
     eventVersion: "v1"
     phase: "fallback"
-    fromMode: "chat"
-    toMode: "responses"
+    fromMode: ApiMode
+    toMode: ApiMode
     reason: string
     status?: number
     modelId?: string
@@ -73,8 +74,8 @@ type Resolved = {
   onFallback?: (event: {
     eventVersion: "v1"
     phase: "fallback"
-    fromMode: "chat"
-    toMode: "responses"
+    fromMode: ApiMode
+    toMode: ApiMode
     reason: string
     status?: number
     modelId?: string
@@ -109,21 +110,18 @@ function getValidationMode(options: AzureFoundryOptions): ApiMode | undefined {
   return undefined
 }
 
-function shouldTryResponsesFallback(
-  endpointUrl: string,
-  modelMode: ApiMode | undefined,
-  globalMode: ApiMode | undefined,
-): boolean {
-  if (modelMode === "chat") return false
-  if (modelMode === "responses") return false
-  if (globalMode === "chat") return false
+function getFallbackTargetMode(mode: ApiMode): ApiMode {
+  return mode === "chat" ? "responses" : "chat"
+}
 
-  try {
-    const path = new URL(endpointUrl).pathname.toLowerCase()
-    return path.endsWith("/openai/v1/chat/completions") || path.endsWith("/chat/completions")
-  } catch {
-    return false
-  }
+function isLanguageModelFallbackAllowed(modelMode: ApiMode | undefined): boolean {
+  return modelMode === undefined
+}
+
+function getModelProviderId(model: LanguageModelV2): string {
+  const provider = model.provider
+  if (typeof provider === "string") return provider
+  return String(provider)
 }
 
 function resolve(options: AzureFoundryOptions): Resolved {
@@ -247,47 +245,47 @@ export function createAzureFoundryProvider(
     const cfg = get()
     const modelMode = cfg.modelOptions[modelId]?.apiMode
     const endpoint = getParsedEndpoint(modelMode ?? cfg.apiMode)
-    if (endpoint.mode === "responses") return createResponses(modelId)
+    const primaryMode = endpoint.mode
+    const primaryModel = primaryMode === "chat" ? createChat(modelId) : createResponses(modelId)
+    if (!isLanguageModelFallbackAllowed(modelMode)) return primaryModel
 
-    const chatModel = createChat(modelId)
-    if (!shouldTryResponsesFallback(endpoint.requestURL, modelMode, cfg.apiMode)) {
-      return chatModel
+    const fallbackMode = getFallbackTargetMode(primaryMode)
+    const fallbackModel = fallbackMode === "chat" ? createChat(modelId) : createResponses(modelId)
+
+    const tryWithFallback = async <T>(
+      runPrimary: () => PromiseLike<T>,
+      runFallback: () => PromiseLike<T>,
+    ) => {
+      try {
+        return await runPrimary()
+      } catch (error) {
+        if (detectOperationMismatch(error) !== primaryMode) throw error
+        cfg.onFallback?.({
+          eventVersion: "v1",
+          phase: "fallback",
+          fromMode: primaryMode,
+          toMode: fallbackMode,
+          reason: `${primaryMode}_operation_mismatch`,
+          ...(modelId ? { modelId } : {}),
+        })
+        return await runFallback()
+      }
     }
 
-    const responsesModel = createResponses(modelId)
     return {
-      ...chatModel,
+      ...primaryModel,
+      provider: getModelProviderId(primaryModel),
       async doGenerate(options: Parameters<LanguageModelV2["doGenerate"]>[0]) {
-        try {
-          return await chatModel.doGenerate(options)
-        } catch (error) {
-          if (!isChatOperationMismatchError(error)) throw error
-          cfg.onFallback?.({
-            eventVersion: "v1",
-            phase: "fallback",
-            fromMode: "chat",
-            toMode: "responses",
-            reason: "chat_operation_mismatch",
-            ...(modelId ? { modelId } : {}),
-          })
-          return responsesModel.doGenerate(options)
-        }
+        return tryWithFallback(
+          () => primaryModel.doGenerate(options),
+          () => fallbackModel.doGenerate(options),
+        )
       },
       async doStream(options: Parameters<LanguageModelV2["doStream"]>[0]) {
-        try {
-          return await chatModel.doStream(options)
-        } catch (error) {
-          if (!isChatOperationMismatchError(error)) throw error
-          cfg.onFallback?.({
-            eventVersion: "v1",
-            phase: "fallback",
-            fromMode: "chat",
-            toMode: "responses",
-            reason: "chat_operation_mismatch",
-            ...(modelId ? { modelId } : {}),
-          })
-          return responsesModel.doStream(options)
-        }
+        return tryWithFallback(
+          () => primaryModel.doStream(options),
+          () => fallbackModel.doStream(options),
+        )
       },
     }
   }
@@ -305,8 +303,10 @@ export function createAzureFoundryProvider(
 
 export const __test = {
   getValidationMode,
+  detectOperationMismatch,
   extractStructuredMismatchSignals,
   shouldParseResponseBody,
   isChatOperationMismatchError,
-  shouldTryResponsesFallback,
+  isLanguageModelFallbackAllowed,
+  getFallbackTargetMode,
 }

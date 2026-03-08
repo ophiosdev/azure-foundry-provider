@@ -5,6 +5,8 @@
 
 const MAX_FALLBACK_RESPONSE_BODY_PARSE_BYTES = 64 * 1024
 
+type OperationMode = "chat" | "responses"
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
@@ -55,16 +57,51 @@ function hasChatOperationContext(text: string): boolean {
   )
 }
 
+function hasResponsesOperationContext(text: string): boolean {
+  const lower = text.toLowerCase()
+  return (
+    lower.includes("responses operation") ||
+    lower.includes("/responses") ||
+    lower.includes('"responses"') ||
+    lower.includes(" responses ") ||
+    lower.startsWith("responses ") ||
+    lower.endsWith(" responses") ||
+    lower === "responses"
+  )
+}
+
+function detectOperationContext(text: string): OperationMode | undefined {
+  if (hasChatOperationContext(text)) return "chat"
+  if (hasResponsesOperationContext(text)) return "responses"
+  return undefined
+}
+
+function hasMismatchSemantics(text: string): boolean {
+  const lower = text.toLowerCase()
+  return (
+    lower.includes("does not work") ||
+    lower.includes("not supported") ||
+    lower.includes("unsupported") ||
+    lower.includes("not available") ||
+    lower.includes("operation_not_supported")
+  )
+}
+
 function extractStructuredMismatchSignals(error: unknown): {
   operationNotSupported: boolean
-  chatContext: boolean
+  rejectedMode: OperationMode | undefined
 } {
   if (!isRecord(error)) {
-    return { operationNotSupported: false, chatContext: false }
+    return { operationNotSupported: false, rejectedMode: undefined }
   }
 
   let operationNotSupported = false
-  let chatContext = false
+  let rejectedMode: OperationMode | undefined
+
+  const trackContext = (value: unknown) => {
+    if (typeof value !== "string" || rejectedMode !== undefined) return
+    rejectedMode = detectOperationContext(value)
+  }
 
   const inspectRecord = (record: Record<string, unknown>) => {
     const code = record["code"]
@@ -73,32 +110,22 @@ function extractStructuredMismatchSignals(error: unknown): {
     }
 
     const operation = record["operation"]
-    if (typeof operation === "string" && hasChatOperationContext(operation)) {
-      chatContext = true
-    }
+    trackContext(operation)
 
     const target = record["target"]
-    if (typeof target === "string" && hasChatOperationContext(target)) {
-      chatContext = true
-    }
+    trackContext(target)
 
     const param = record["param"]
-    if (typeof param === "string" && hasChatOperationContext(param)) {
-      chatContext = true
-    }
+    trackContext(param)
 
     const path = record["path"]
-    if (typeof path === "string" && hasChatOperationContext(path)) {
-      chatContext = true
-    }
+    trackContext(path)
 
     const loc = record["loc"]
     if (Array.isArray(loc)) {
       for (const segment of loc) {
-        if (typeof segment === "string" && hasChatOperationContext(segment)) {
-          chatContext = true
-          break
-        }
+        trackContext(segment)
+        if (rejectedMode !== undefined) break
       }
     }
   }
@@ -138,7 +165,7 @@ function extractStructuredMismatchSignals(error: unknown): {
 
   return {
     operationNotSupported,
-    chatContext,
+    rejectedMode,
   }
 }
 
@@ -181,11 +208,11 @@ function extractErrorTextCandidates(error: unknown): string[] {
 
   const responseBody = error["responseBody"]
   if (typeof responseBody === "string") {
-    addString(candidates, responseBody)
     if (shouldParseResponseBody(responseBody)) {
       try {
         const parsed: unknown = JSON.parse(responseBody)
         if (isRecord(parsed)) {
+          addString(candidates, responseBody)
           addString(candidates, parsed["message"])
           addString(candidates, parsed["code"])
           const parsedError = parsed["error"]
@@ -194,8 +221,11 @@ function extractErrorTextCandidates(error: unknown): string[] {
             addString(candidates, parsedError["code"])
             addString(candidates, parsedError["type"])
           }
+        } else {
+          addString(candidates, responseBody)
         }
       } catch {
+        addString(candidates, responseBody)
         // ignore invalid JSON response body
       }
     }
@@ -204,36 +234,41 @@ function extractErrorTextCandidates(error: unknown): string[] {
   return candidates
 }
 
-function hasChatOperationMismatchText(text: string): boolean {
+function detectOperationMismatchFromText(text: string): OperationMode | undefined {
   const lower = text.toLowerCase()
-  if (lower.includes("content_filter")) return false
-
-  const chatOperationMentioned =
-    lower.includes("chatcompletion operation") ||
-    lower.includes("chat completions operation") ||
-    hasChatOperationContext(lower)
-
-  const unsupportedMentioned =
-    lower.includes("does not work") ||
-    lower.includes("not supported") ||
-    lower.includes("unsupported") ||
-    lower.includes("not available") ||
-    lower.includes("operation_not_supported")
-
-  return chatOperationMentioned && unsupportedMentioned
+  if (lower.includes("content_filter")) return undefined
+  if (lower.includes("see docs:")) return undefined
+  if (lower.includes("reasoning_content")) return undefined
+  if (lower.startsWith("[")) return undefined
+  if (!hasMismatchSemantics(lower)) return undefined
+  return detectOperationContext(lower)
 }
 
-function isChatOperationMismatchError(error: unknown): boolean {
+function detectOperationMismatch(error: unknown): OperationMode | undefined {
   const status = extractStatusCode(error)
-  if (status !== undefined && status !== 400) return false
+  if (status !== undefined && status !== 400) return undefined
 
   const structured = extractStructuredMismatchSignals(error)
-  if (structured.operationNotSupported && structured.chatContext) {
-    return true
+  if (structured.operationNotSupported && structured.rejectedMode !== undefined) {
+    return structured.rejectedMode
   }
 
   const candidates = extractErrorTextCandidates(error)
-  return candidates.some((candidate) => hasChatOperationMismatchText(candidate))
+  for (const candidate of candidates) {
+    const rejectedMode = detectOperationMismatchFromText(candidate)
+    if (rejectedMode !== undefined) return rejectedMode
+  }
+
+  return undefined
 }
 
-export { extractStructuredMismatchSignals, isChatOperationMismatchError, shouldParseResponseBody }
+function isChatOperationMismatchError(error: unknown): boolean {
+  return detectOperationMismatch(error) === "chat"
+}
+
+export {
+  detectOperationMismatch,
+  extractStructuredMismatchSignals,
+  isChatOperationMismatchError,
+  shouldParseResponseBody,
+}

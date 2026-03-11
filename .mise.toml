@@ -12,7 +12,11 @@ trufflehog = "latest"
 typos = "latest"
 
 [hooks]
-enter = ["mise run install-packages"]
+enter = ["mise run setup"]
+
+[tasks.setup]
+description = "Initialize the repository"
+depends = ["install-packages", "install-hooks"]
 
 [tasks.install-packages]
 description = "Install node dependencies when package.json changed"
@@ -41,6 +45,18 @@ if [ -f package.json ] && [ -z "${NODE_NO_INSTALL_PACKAGES:-}" ]; then
     mkdir -p node_modules
     touch node_modules/.package.json
   fi
+fi
+'''
+
+[tasks.install-hooks]
+description = "Setup git hooks using prek"
+alias = "ih"
+sources = [".pre-commit-config.yaml"]
+outputs = [".git/prek-hooks-configured"]
+silent = true
+run = '''
+if test -f .pre-commit-config.yaml && test -d .git; then
+  prek install && touch .git/prek-hooks-configured
 fi
 '''
 

@@ -1125,6 +1125,248 @@ This pattern is useful when a provider points to a single v1 base root but indiv
 
 Global `apiMode` controls the first attempt for models without a per-model override. If a model has `modelOptions[modelId].apiMode`, that per-model mode is strict for that model and disables automatic cross-transport recovery.
 
+### 16) OpenCode/Kilo JSON: Basic quota settings
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": {
+        "deepseek-v3.1": {
+          "id": "DeepSeek-V3.1",
+          "name": "DeepSeek V3.1"
+        }
+      },
+      "options": {
+        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
+        "apiKey": "{env:AZURE_API_KEY}",
+        "apiMode": "chat",
+        "quota": {
+          "default": {
+            "rpm": 60,
+            "tpm": 100000,
+            "maxConcurrent": 4
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 17) OpenCode/Kilo JSON: Static quota with per-model overrides
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": {
+        "kimi-k2.5": {
+          "id": "FW-Kimi-K2.5",
+          "name": "Kimi K2.5"
+        },
+        "mistral-large-3": {
+          "id": "Mistral-Large-3",
+          "name": "Mistral Large 3"
+        }
+      },
+      "options": {
+        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
+        "apiKey": "{env:AZURE_API_KEY}",
+        "apiMode": "chat",
+        "quota": {
+          "default": {
+            "rpm": 30,
+            "tpm": 50000,
+            "maxConcurrent": 2
+          },
+          "models": {
+            "FW-Kimi-K2.5": {
+              "rpm": 10,
+              "tpm": 20000,
+              "maxConcurrent": 1
+            },
+            "Mistral-Large-3": {
+              "rpm": 20,
+              "tpm": 40000,
+              "maxConcurrent": 2
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 18) OpenCode/Kilo JSON: Retry tuning
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": {
+        "deepseek-v3.1": {
+          "id": "DeepSeek-V3.1",
+          "name": "DeepSeek V3.1"
+        }
+      },
+      "options": {
+        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
+        "apiKey": "{env:AZURE_API_KEY}",
+        "quota": {
+          "retry": {
+            "maxAttempts": 5,
+            "baseDelayMs": 800,
+            "maxDelayMs": 20000,
+            "jitterRatio": 0.2,
+            "honorRetryAfter": true,
+            "cooldownOn429Ms": 5000
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 19) OpenCode/Kilo JSON: Adaptive throttling tuning
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": {
+        "deepseek-v3.1": {
+          "id": "DeepSeek-V3.1",
+          "name": "DeepSeek V3.1"
+        }
+      },
+      "options": {
+        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
+        "apiKey": "{env:AZURE_API_KEY}",
+        "quota": {
+          "adaptive": {
+            "enabled": true,
+            "minCooldownMs": 1000,
+            "lowWatermarkRatio": 0.1,
+            "lowCooldownMs": 250
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 20) OpenCode/Kilo JSON: Disable adaptive throttling
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": {
+        "deepseek-v3.1": {
+          "id": "DeepSeek-V3.1",
+          "name": "DeepSeek V3.1"
+        }
+      },
+      "options": {
+        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
+        "apiKey": "{env:AZURE_API_KEY}",
+        "quota": {
+          "adaptive": {
+            "enabled": false
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 21) OpenCode/Kilo JSON: Per-model cooldown scope
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": {
+        "kimi-k2.5": {
+          "id": "FW-Kimi-K2.5",
+          "name": "Kimi K2.5"
+        },
+        "mistral-large-3": {
+          "id": "Mistral-Large-3",
+          "name": "Mistral Large 3"
+        }
+      },
+      "options": {
+        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
+        "apiKey": "{env:AZURE_API_KEY}",
+        "cooldownScope": "per-model",
+        "quota": {
+          "adaptive": {
+            "enabled": true
+          },
+          "retry": {
+            "maxAttempts": 4,
+            "cooldownOn429Ms": 10000
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 23) OpenCode/Kilo JSON: Assistant reasoning sanitization
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": {
+        "mistral-large-3": {
+          "id": "Mistral-Large-3",
+          "name": "Mistral Large 3",
+          "modalities": { "input": ["text"], "output": ["text"] }
+        },
+        "deepseek-v3.1": {
+          "id": "DeepSeek-V3.1",
+          "name": "DeepSeek V3.1",
+          "modalities": { "input": ["text"], "output": ["text"] }
+        }
+      },
+      "options": {
+        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
+        "apiKey": "{env:AZURE_API_KEY}",
+        "assistantReasoningSanitization": "auto",
+        "modelOptions": {
+          "Mistral-Large-3": {
+            "assistantReasoningSanitization": "always"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
 ## Environment variables
 
 - `AZURE_FOUNDRY_ENDPOINT`: fallback for `options.endpoint`

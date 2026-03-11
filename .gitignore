@@ -52,3 +52,4 @@ pids
 .yarn
 bun.lockb
 .history/
+.opencode

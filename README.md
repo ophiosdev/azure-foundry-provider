@@ -116,6 +116,39 @@ const model = provider.languageModel("DeepSeek-V3.1")
 }
 ```
 
+### VS Code schema for `opencode.json`
+
+This repo ships a derived OpenCode schema at `schemas/opencode.azure-foundry.schema.json`.
+It composes with the upstream OpenCode schema at `https://opencode.ai/config.json` and adds IntelliSense for Azure Foundry provider entries whose `npm` value contains `azure-foundry-provider`.
+
+Use it by pointing your local config at the schema file:
+
+```json
+{
+  "$schema": "./schemas/opencode.azure-foundry.schema.json"
+}
+```
+
+Or map it in `.vscode/settings.json`:
+
+```json
+{
+  "json.schemas": [
+    {
+      "fileMatch": ["opencode.json"],
+      "url": "./schemas/opencode.azure-foundry.schema.json"
+    }
+  ]
+}
+```
+
+Notes:
+
+- The derived schema keeps upstream OpenCode validation and only narrows `provider.<name>.options` for Azure Foundry provider entries.
+- Runtime-only options such as `fetch` and callback hooks are intentionally omitted because they are not JSON-serializable OpenCode config values.
+- `modelOptions` and `quota.models` are keyed by the runtime model id the provider receives. OpenCode examples may use aliases or ids, so treat those keys carefully.
+- Endpoint semantics such as `/openai/v1` requiring effective `apiMode` and `/models/chat/completions` requiring `api-version` are documented in schema descriptions, but JSON Schema cannot fully enforce all runtime constraints.
+
 ## API
 
 ### `createAzureFoundryProvider(options?)`

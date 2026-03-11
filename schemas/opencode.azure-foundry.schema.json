@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ophios.com/json/opencode.azure-foundry.schema.json",
+  "title": "OpenCode config with Azure Foundry provider options",
+  "description": "Composes the upstream OpenCode configuration schema and adds IntelliSense for provider entries loaded from azure-foundry-provider.",
+  "allOf": [
+    {
+      "$ref": "https://opencode.ai/config.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/providerEntryOverlay"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "providerEntryOverlay": {
+      "if": {
+        "type": "object",
+        "properties": {
+          "npm": {
+            "type": "string",
+            "pattern": "(^|[/@._-])azure-foundry-provider([/@._-]|$)"
+          }
+        },
+        "required": ["npm"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "options": {
+            "allOf": [
+              {
+                "type": "object"
+              },
+              {
+                "$ref": "#/$defs/azureFoundryOptions"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "azureFoundryOptions": {
+      "type": "object",
+      "description": "JSON-serializable options for azure-foundry-provider. Runtime-only function options such as fetch and callback hooks are intentionally excluded from this schema.",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Full Azure endpoint URL. Must use https://. Supported suffixes include /models/chat/completions, /chat/completions, /responses, /openai/v1/chat/completions, /openai/v1/responses, and /openai/v1. The /models/chat/completions path requires an api-version query param. The /openai/v1 base path requires an effective apiMode from global apiMode or modelOptions[modelId].apiMode."
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "Azure API key value. In OpenCode JSON this is commonly an env placeholder like {env:AZURE_API_KEY}."
+        },
+        "headers": {
+          "type": "object",
+          "description": "Extra headers added to every request. If Authorization or api-key is set here, the provider does not auto-inject api-key from apiKey.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "apiMode": {
+          "type": "string",
+          "enum": ["chat", "responses"],
+          "description": "Global mode override. Precedence is modelOptions[modelId].apiMode, then global apiMode, then mode inferred from the endpoint path."
+        },
+        "toolPolicy": {
+          "type": "string",
+          "enum": ["auto", "off", "on"],
+          "description": "Tool handling policy. auto passes through, off strips tools and forces no tool choice, on forces required tool choice when tools exist and the choice is not already fixed."
+        },
+        "timeout": {
+          "description": "Request timeout in milliseconds, or false to disable the timeout wrapper.",
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "const": false
+            }
+          ]
+        },
+        "quota": {
+          "$ref": "#/$defs/quotaOptions"
+        },
+        "cooldownScope": {
+          "type": "string",
+          "enum": ["global", "per-model"],
+          "description": "Cooldown targeting after rate-limit pressure. global pauses all models on the provider instance; per-model isolates cooldown to the triggering model."
+        },
+        "assistantReasoningSanitization": {
+          "type": "string",
+          "enum": ["auto", "always", "never"],
+          "description": "Assistant reasoning field sanitization policy. auto retries once with reasoning fields removed after a matching schema rejection and remembers strictness in-process for that model."
+        },
+        "modelOptions": {
+          "type": "object",
+          "description": "Per-model provider overrides keyed by runtime model id. Examples in OpenCode configs may use model aliases or ids; the provider contract is based on the model id it receives at runtime.",
+          "additionalProperties": {
+            "$ref": "#/$defs/modelRequestOptions"
+          }
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional provider id prefix used for diagnostics. Defaults to azure-foundry."
+        }
+      },
+      "additionalProperties": true
+    },
+    "modelRequestOptions": {
+      "type": "object",
+      "properties": {
+        "apiMode": {
+          "type": "string",
+          "enum": ["chat", "responses"],
+          "description": "Per-model mode override. Takes precedence over global apiMode and disables automatic cross-transport fallback for that model."
+        },
+        "assistantReasoningSanitization": {
+          "type": "string",
+          "enum": ["auto", "always", "never"],
+          "description": "Per-model reasoning sanitization policy. Takes precedence over the global assistantReasoningSanitization value."
+        }
+      },
+      "additionalProperties": false
+    },
+    "quotaOptions": {
+      "type": "object",
+      "description": "Static quota controls plus retry and adaptive throttling settings.",
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/quotaRule"
+        },
+        "models": {
+          "type": "object",
+          "description": "Per-model quota overrides keyed by runtime model id. Unspecified fields inherit from quota.default.",
+          "additionalProperties": {
+            "$ref": "#/$defs/quotaRule"
+          }
+        },
+        "retry": {
+          "$ref": "#/$defs/quotaRetryOptions"
+        },
+        "adaptive": {
+          "$ref": "#/$defs/quotaAdaptiveOptions"
+        }
+      },
+      "additionalProperties": false
+    },
+    "quotaRule": {
+      "type": "object",
+      "properties": {
+        "rpm": {
+          "type": "number",
+          "description": "Requests per minute. Non-positive values are treated as unset at runtime."
+        },
+        "tpm": {
+          "type": "number",
+          "description": "Tokens per minute. Non-positive values are treated as unset at runtime."
+        },
+        "maxConcurrent": {
+          "type": "number",
+          "description": "Maximum concurrent in-flight requests. Non-positive values are treated as unset at runtime."
+        },
+        "maxOutputTokensCap": {
+          "type": "number",
+          "description": "Upper bound applied to outgoing output-token budget fields. Non-positive values are treated as unset at runtime."
+        }
+      },
+      "additionalProperties": false
+    },
+    "quotaRetryOptions": {
+      "type": "object",
+      "properties": {
+        "maxAttempts": {
+          "type": "number",
+          "description": "Maximum request attempts including the first one. Runtime normalization floors values and clamps the minimum to 1."
+        },
+        "baseDelayMs": {
+          "type": "number",
+          "description": "Base retry delay in milliseconds. Runtime normalization floors values and clamps the minimum to 1."
+        },
+        "maxDelayMs": {
+          "type": "number",
+          "description": "Maximum retry delay in milliseconds. Runtime normalization floors values and clamps the minimum to 1."
+        },
+        "jitterRatio": {
+          "type": "number",
+          "description": "Retry jitter ratio. Runtime normalization clamps the minimum to 0."
+        },
+        "honorRetryAfter": {
+          "type": "boolean",
+          "description": "Whether to honor Retry-After headers on retryable responses."
+        },
+        "cooldownOn429Ms": {
+          "type": "number",
+          "description": "Base cooldown applied after 429 responses. Runtime normalization floors values and clamps the minimum to 0."
+        }
+      },
+      "additionalProperties": false
+    },
+    "quotaAdaptiveOptions": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable adaptive throttling from Azure x-ratelimit-* response headers."
+        },
+        "minCooldownMs": {
+          "type": "number",
+          "description": "Minimum cooldown duration in milliseconds. Runtime normalization floors values and clamps the minimum to 0."
+        },
+        "lowWatermarkRatio": {
+          "type": "number",
+          "description": "Low-watermark threshold ratio in the inclusive range [0, 1]. Runtime normalization clamps values into that range."
+        },
+        "lowCooldownMs": {
+          "type": "number",
+          "description": "Cooldown applied when remaining request or token budgets fall below the low watermark. Runtime normalization floors values and clamps the minimum to 0."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

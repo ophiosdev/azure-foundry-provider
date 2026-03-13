@@ -1,16 +1,41 @@
 import js from "@eslint/js"
 import eslintConfigPrettier from "eslint-config-prettier/flat"
+import licenseHeader from "eslint-plugin-license-header"
 import globals from "globals"
 import tseslint from "typescript-eslint"
 
+const lintedFiles = ["**/src/**/*.{ts,js,mjs,cjs}", "**/test/**/*.{ts,js,mjs,cjs}"]
+
+const requiredHeader = [
+  "/*",
+  " * SPDX-FileCopyrightText: 2026 Ophios GmbH and contributors",
+  " * SPDX-License-Identifier: AGPL-3.0-or-later",
+  " */",
+].join("\n")
+
 export default tseslint.config(
   {
-    ignores: ["node_modules/**", "coverage/**", "dist/**", "eslint.config.mjs"],
+    ignores: ["**/node_modules/**", "**/coverage/**", "**/dist/**", "eslint.config.mjs"],
   },
-  js.configs.recommended,
-  ...tseslint.configs.strictTypeChecked,
   {
-    files: ["src/**/*.ts"],
+    ...js.configs.recommended,
+    files: lintedFiles,
+  },
+  ...tseslint.configs.strictTypeChecked.map((config) => ({
+    ...config,
+    files: ["**/src/**/*.ts", "**/test/**/*.ts"],
+  })),
+  {
+    files: lintedFiles,
+    plugins: {
+      "license-header": licenseHeader,
+    },
+    rules: {
+      "license-header/header": ["error", requiredHeader.split("\n")],
+    },
+  },
+  {
+    files: ["**/src/**/*.ts"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
@@ -53,7 +78,19 @@ export default tseslint.config(
     },
   },
   {
-    files: ["test/**/*.ts"],
+    files: ["**/src/**/*.{js,mjs,cjs}", "**/test/**/*.{js,mjs,cjs}"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: {
+        ...globals.bun,
+        ...globals.browser,
+        ...globals.node,
+      },
+    },
+  },
+  {
+    files: ["**/test/**/*.ts"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",

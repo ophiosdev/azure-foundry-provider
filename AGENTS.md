@@ -31,6 +31,35 @@ Primary layout:
 - `CHANGELOG.md` is the release-facing source of truth for shipped behavior and release summaries.
 - Temporary planning or evidence files may exist locally during active work, but contributors must not depend on them being committed.
 
+## Engram usage
+
+Use engram proactively to preserve durable context and reduce rediscovery cost across sessions.
+
+- At session start, prefer retrieving recent context from engram before re-exploring the repo.
+- Save the user's intent when it materially shapes the work, especially for multi-step or cross-session tasks.
+- After meaningful work, save durable observations covering architecture, bug fixes, decisions, patterns, configuration changes, or important discoveries.
+- Use structured memory entries with clear `What`, `Why`, `Where`, and `Learned` content so future sessions can reuse them quickly.
+- Keep repo-local implementation memories under project `azure-foundry-provider` when they are mainly specific to this package.
+- Also save cross-project Azure Foundry knowledge under shared project `azure-foundry-shared` when it is likely to be useful in other repositories or tools.
+- For Azure Foundry tasks in any repo, the preferred retrieval path is the shared engram project `azure-foundry-shared`.
+- Start Azure Foundry retrieval from topic key `index/azure-foundry-shared`, then load only the relevant topic keys for the task.
+- Current shared Azure Foundry topic keys include:
+  - `architecture/provider-url-routing`
+  - `decision/fallback-sanitization`
+  - `architecture/quota-throttling`
+  - `architecture/inspect-package`
+  - `pattern/deployment-inspection-data`
+  - `pattern/html-report-rendering`
+  - `decision/endpoint-display`
+  - `pattern/rate-limit-display`
+  - `pattern/provider-snippet-shape`
+  - `learning/opencode-output-limit-note`
+- Standard retrieval prompt for future sessions:
+
+```text
+Load Azure Foundry shared context from engram project azure-foundry-shared. First fetch the knowledge index (topic key: index/azure-foundry-shared), then retrieve any relevant topics for the task from: architecture/provider-url-routing, decision/fallback-sanitization, architecture/quota-throttling, architecture/inspect-package, pattern/deployment-inspection-data, pattern/html-report-rendering, decision/endpoint-display, pattern/rate-limit-display, pattern/provider-snippet-shape, learning/opencode-output-limit-note. Summarize the relevant rules before making changes.
+```
+
 ## Key files
 
 - `src/url.ts`: endpoint parsing, validation, mode inference/override path rewriting

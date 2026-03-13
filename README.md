@@ -2,6 +2,8 @@
 
 `azure-foundry-provider` is a highly specialized, production-grade AI SDK provider designed for Azure AI Foundry and Azure OpenAI-compatible endpoints.
 
+This repository also includes [`packages/azure-foundry-inspect`](packages/azure-foundry-inspect/README.md), a standalone read-only utility that uses the Azure Cognitive Services management SDK to inspect one Azure Foundry resource and emit JSON or HTML for its account metadata, deployments, usages, and model capacities.
+
 ## Principals
 
 ### URL-First Determinism

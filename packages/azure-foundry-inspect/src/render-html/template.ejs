@@ -1,0 +1,126 @@
+<!-- SPDX-FileCopyrightText: 2026 Ophios GmbH and contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= page.title %></title>
+  <style>
+<%- inlineCss %>
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <h1>Azure Foundry Inspect</h1>
+      <p class="subtitle"><%= page.accountName %></p>
+    </header>
+    <section class="card summary">
+      <div class="kvgrid">
+<% for (const row of summaryRows) { %>
+        <div class="kv"><span class="k"><%= row.label %></span><span class="v"><%= row.value %></span></div>
+<% } %>
+      </div>
+    </section>
+    <h2 class="section-title">Deployments</h2>
+    <section class="deployments">
+<% if (deployments.length === 0) { %>
+      <p class="muted">No deployments found.</p>
+<% } %>
+<% for (const deployment of deployments) { %>
+      <article class="card deployment-card">
+        <div class="card-head">
+          <div>
+            <h3><%= deployment.title %></h3>
+            <div class="chips">
+<% for (const chip of deployment.chips) { %>
+              <span class="chip"><%= chip %></span>
+<% } %>
+            </div>
+          </div>
+          <div class="badges">
+<% for (const badge of deployment.badges) { %>
+            <span class="badge"><%= badge %></span>
+<% } %>
+<% if (deployment.providerConfig) { %>
+            <button type="button" class="config-button" data-config-dialog-open="<%= deployment.providerConfig.dialogId %>">View provider config</button>
+<% } %>
+          </div>
+        </div>
+<% if (deployment.limits.length > 0) { %>
+        <section class="subcard">
+          <h4>Limits</h4>
+          <div class="kvgrid">
+<% for (const row of deployment.limits) { %>
+            <div class="kv"><span class="k"><%= row.label %></span><span class="v" title="<%= row.title %>"><%= row.value %></span></div>
+<% } %>
+          </div>
+        </section>
+<% } %>
+<% if (deployment.details.length > 0) { %>
+        <section class="subcard">
+          <h4>Deployment</h4>
+          <div class="kvgrid">
+<% for (const row of deployment.details) { %>
+            <div class="kv<%= row.wide ? ' kv-wide' : '' %>"><span class="k"><%= row.label %></span><span class="v"><%- row.valueHtml ?? row.valueText %></span></div>
+<% } %>
+          </div>
+        </section>
+<% } %>
+        <section class="subcard">
+          <h4>Rate limits</h4>
+<% if (deployment.rateLimits.length === 0) { %>
+          <p class="muted">No reported rate limits.</p>
+<% } else { %>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Count</th><th>Renewal period</th></tr>
+            </thead>
+            <tbody>
+<% for (const row of deployment.rateLimits) { %>
+              <tr>
+                <td><%- row.keyHtml %></td>
+                <td><span title="<%= row.countTitle %>"><%= row.countDisplay %></span></td>
+                <td><span title="<%= row.renewalTitle %>"><%= row.renewalDisplay %></span></td>
+              </tr>
+<% } %>
+            </tbody>
+          </table>
+<% } %>
+        </section>
+<% if (deployment.capabilities.length > 0) { %>
+        <details class="caps">
+          <summary>Capabilities</summary>
+          <table>
+            <tbody>
+<% for (const row of deployment.capabilities) { %>
+              <tr><td><%= row.key %></td><td><%= row.value %></td></tr>
+<% } %>
+            </tbody>
+          </table>
+        </details>
+<% } %>
+<% if (deployment.providerConfig) { %>
+        <dialog id="<%= deployment.providerConfig.dialogId %>" class="config-dialog" aria-labelledby="<%= deployment.providerConfig.dialogId %>-title">
+          <div class="dialog-body">
+            <h4 id="<%= deployment.providerConfig.dialogId %>-title">Azure Foundry Provider config</h4>
+            <p class="muted">Preferred mode inferred from deployment capabilities.</p>
+            <div class="config-panel is-active"><div class="json-container"><%- deployment.providerConfig.prettyHtml %></div></div>
+            <div class="dialog-actions">
+              <button type="button" class="config-copy" data-config-copy="<%= deployment.providerConfig.dialogId %>">Copy JSON</button>
+              <button type="button" class="config-close">Close</button>
+            </div>
+            <textarea class="config-raw-copy" id="<%= deployment.providerConfig.dialogId %>-raw"><%= deployment.providerConfig.rawJson %></textarea>
+          </div>
+        </dialog>
+<% } %>
+      </article>
+<% } %>
+    </section>
+  </div>
+  <script>
+<%- inlineJs %>
+  </script>
+</body>
+</html>

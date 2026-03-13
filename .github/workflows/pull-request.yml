@@ -28,7 +28,11 @@ jobs:
       - name: Setup toolchain with mise
         uses: jdx/mise-action@v2
 
-      - name: Install dependencies
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install azure-foundry-inspect package dependencies
+        working-directory: packages/azure-foundry-inspect
         run: bun install --frozen-lockfile
 
       - name: Run prek hooks

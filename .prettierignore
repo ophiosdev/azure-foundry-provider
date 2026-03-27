@@ -10,3 +10,4 @@ bun.lock
 logs
 *.log*
 .env*
+.evidence

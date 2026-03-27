@@ -1,4 +1,5 @@
 {
+  "plugins": ["prettier-plugin-multiline-arrays"],
   "printWidth": 100,
   "tabWidth": 2,
   "useTabs": false,
@@ -13,6 +14,12 @@
       "files": ".yamllint",
       "options": {
         "parser": "yaml"
+      }
+    },
+    {
+      "files": "renovate.json",
+      "options": {
+        "multilineArraysWrapThreshold": 1
       }
     }
   ]

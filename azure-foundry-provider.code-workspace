@@ -2,10 +2,10 @@
   "folders": [
     {
       "name": "provider",
-      "path": "."
+      "path": ".",
     },
     {
-      "path": "./packages/azure-foundry-inspect"
-    }
-  ]
+      "path": "./packages/azure-foundry-inspect",
+    },
+  ],
 }

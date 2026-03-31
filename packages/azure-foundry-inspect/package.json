@@ -17,7 +17,7 @@
   "dependencies": {
     "@azure/arm-cognitiveservices": "^8.1.0",
     "@azure/identity": "^4.13.0",
-    "@inquirer/prompts": "^7.9.0",
+    "@inquirer/prompts": "^8.0.0",
     "ejs": "^5.0.1",
     "pretty-print-json": "^3.0.7",
     "yargs": "^18.0.0"

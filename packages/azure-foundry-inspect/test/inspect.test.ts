@@ -124,4 +124,28 @@ describe("inspectResource", () => {
       ],
     })
   })
+
+  test("sorts deployments by name before normalization", async () => {
+    const out = (await inspectResource({
+      subscriptionId: "sub-1",
+      resourceGroup: "rg-1",
+      accountName: "acct-1",
+      client: {
+        account: () => Promise.resolve({ id: "acct-id", name: "acct-1" }),
+        deployments: () =>
+          Promise.resolve([
+            { id: "dep-b", name: "b", properties: {} },
+            { id: "dep-a", name: "a", properties: {} },
+          ]),
+      },
+    })) as Output
+
+    expect(out.deployments.map((item) => item.name)).toEqual(["a", "b"])
+  })
+
+  test("rejects missing selector inputs", async () => {
+    await expect(inspectResource({})).rejects.toThrow(
+      "Use either --resource-id or --subscription/--resource-group/--account",
+    )
+  })
 })

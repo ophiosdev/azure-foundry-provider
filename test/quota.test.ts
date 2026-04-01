@@ -821,6 +821,18 @@ describe("quota internals", () => {
     release()
   })
 
+  test("governor cooldown wait rejects when aborted after timer is scheduled", async () => {
+    const governor = __test.createGovernor({})
+    const controller = new AbortController()
+
+    governor.setCooldown(1000)
+    const pending = governor.acquire("m", 1, controller.signal)
+
+    setTimeout(() => controller.abort(), 0)
+
+    await expect(pending).rejects.toThrow("aborted")
+  })
+
   test("adaptive options and header application branches", () => {
     const governor = __test.createGovernor({
       quota: {

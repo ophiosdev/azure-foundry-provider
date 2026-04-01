@@ -5,38 +5,48 @@
 
 import { describe, expect, test } from "bun:test"
 import type {
-  LanguageModelV2,
-  LanguageModelV2CallOptions,
-  LanguageModelV2StreamPart,
+  LanguageModelV3,
+  LanguageModelV3CallOptions,
+  LanguageModelV3StreamPart,
 } from "@ai-sdk/provider"
 import { applyRequestPolicy } from "../src/request"
 
-function mockModel() {
-  const calls: LanguageModelV2CallOptions[] = []
+function usage() {
+  return {
+    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1, text: 1, reasoning: 0 },
+  }
+}
 
-  const model: LanguageModelV2 = {
-    specificationVersion: "v2",
+function mockModel() {
+  const calls: LanguageModelV3CallOptions[] = []
+
+  const model: LanguageModelV3 = {
+    specificationVersion: "v3",
     provider: "test",
     modelId: "m",
     supportedUrls: {},
-    async doGenerate(options) {
+    async doGenerate(options: LanguageModelV3CallOptions) {
       calls.push(options)
       return {
         content: [{ type: "text", text: "ok" }],
-        finishReason: "stop",
-        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: usage(),
         warnings: [],
       }
     },
-    async doStream(options) {
+    async doStream(options: LanguageModelV3CallOptions) {
       calls.push(options)
-      const stream = new ReadableStream<LanguageModelV2StreamPart>({
+      const stream = new ReadableStream<LanguageModelV3StreamPart>({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] })
+          controller.enqueue({ type: "text-start", id: "text-1" })
+          controller.enqueue({ type: "text-delta", id: "text-1", delta: "ok" })
+          controller.enqueue({ type: "text-end", id: "text-1" })
           controller.enqueue({
             type: "finish",
-            finishReason: "stop",
-            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            finishReason: { unified: "stop", raw: "stop" },
+            usage: usage(),
           })
           controller.close()
         },
@@ -50,6 +60,12 @@ function mockModel() {
 }
 
 describe("applyRequestPolicy", () => {
+  test("wrapped model stays v3", () => {
+    const { model } = mockModel()
+    const wrapped = applyRequestPolicy(model, { mode: "chat", toolPolicy: "auto" })
+    expect(wrapped.specificationVersion).toBe("v3")
+  })
+
   test("chat mode keeps maxOutputTokens unchanged", async () => {
     const { model, calls } = mockModel()
     const wrapped = applyRequestPolicy(model, { mode: "chat", toolPolicy: "auto" })
@@ -217,5 +233,17 @@ describe("applyRequestPolicy", () => {
     const { model } = mockModel()
     const wrapped = applyRequestPolicy(model, { mode: "responses", toolPolicy: "auto" })
     expect(wrapped).toBe(model)
+  })
+
+  test("wrapped stream remains consumable after policy transform", async () => {
+    const { model } = mockModel()
+    const wrapped = applyRequestPolicy(model, { mode: "chat", toolPolicy: "off" })
+    const result = await wrapped.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [],
+    })
+    const reader = result.stream.getReader()
+    const first = await reader.read()
+    expect(first.value?.type).toBe("stream-start")
   })
 })

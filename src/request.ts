@@ -5,11 +5,10 @@
 
 import { wrapLanguageModel } from "ai"
 import type {
-  LanguageModelV2,
-  LanguageModelV2CallOptions,
-  LanguageModelV2Middleware,
-  SharedV2ProviderOptions,
-} from "@ai-sdk/provider"
+  ProviderLanguageModel,
+  ProviderLanguageModelCallOptions,
+  ProviderLanguageModelMiddleware,
+} from "./sdk-types"
 import type { ApiMode } from "./url"
 
 export type ToolPolicy = "auto" | "off" | "on"
@@ -24,8 +23,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function dropParallelToolCalls(
-  providerOptions: SharedV2ProviderOptions | undefined,
-): SharedV2ProviderOptions | undefined {
+  providerOptions: ProviderLanguageModelCallOptions["providerOptions"],
+): ProviderLanguageModelCallOptions["providerOptions"] {
   if (!providerOptions) return undefined
 
   const openaiOptions = providerOptions["openai"]
@@ -42,10 +41,10 @@ function dropParallelToolCalls(
   }
 
   if (entries.length === 0) return undefined
-  return Object.fromEntries(entries) as SharedV2ProviderOptions
+  return Object.fromEntries(entries)
 }
 
-function stripTools(options: LanguageModelV2CallOptions): LanguageModelV2CallOptions {
+function stripTools(options: ProviderLanguageModelCallOptions): ProviderLanguageModelCallOptions {
   const providerOptions = dropParallelToolCalls(options.providerOptions)
   const { providerOptions: _providerOptions, ...rest } = options
 
@@ -57,7 +56,7 @@ function stripTools(options: LanguageModelV2CallOptions): LanguageModelV2CallOpt
   }
 }
 
-function enforceTools(options: LanguageModelV2CallOptions): LanguageModelV2CallOptions {
+function enforceTools(options: ProviderLanguageModelCallOptions): ProviderLanguageModelCallOptions {
   if (!options.tools || options.tools.length === 0) return options
   if (options.toolChoice?.type === "required") return options
   if (options.toolChoice?.type === "tool") return options
@@ -69,9 +68,9 @@ function enforceTools(options: LanguageModelV2CallOptions): LanguageModelV2CallO
 }
 
 function transform(
-  options: LanguageModelV2CallOptions,
+  options: ProviderLanguageModelCallOptions,
   policy: PolicyOptions,
-): LanguageModelV2CallOptions {
+): ProviderLanguageModelCallOptions {
   if (policy.toolPolicy === "off") {
     return stripTools(options)
   }
@@ -83,12 +82,15 @@ function transform(
   return options
 }
 
-export function applyRequestPolicy(model: LanguageModelV2, policy: PolicyOptions): LanguageModelV2 {
+export function applyRequestPolicy<MODEL extends ProviderLanguageModel>(
+  model: MODEL,
+  policy: PolicyOptions,
+): MODEL {
   if (policy.mode !== "chat" && policy.toolPolicy === "auto") return model
 
-  const middleware: LanguageModelV2Middleware = {
-    middlewareVersion: "v2",
-    async transformParams({ params }) {
+  const middleware: ProviderLanguageModelMiddleware = {
+    specificationVersion: "v3",
+    async transformParams({ params }: { params: ProviderLanguageModelCallOptions }) {
       return Promise.resolve(transform(params, policy))
     },
   }
@@ -96,5 +98,5 @@ export function applyRequestPolicy(model: LanguageModelV2, policy: PolicyOptions
   return wrapLanguageModel({
     model,
     middleware,
-  })
+  }) as MODEL
 }

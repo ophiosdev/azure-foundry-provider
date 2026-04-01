@@ -5,7 +5,6 @@
 
 import { OpenAIResponsesLanguageModel } from "@ai-sdk/openai/internal"
 import { OpenAICompatibleChatLanguageModel } from "@ai-sdk/openai-compatible"
-import type { EmbeddingModelV2, ImageModelV2, LanguageModelV2, ProviderV2 } from "@ai-sdk/provider"
 import { NoSuchModelError } from "@ai-sdk/provider"
 import { loadApiKey, loadSetting, withUserAgentSuffix } from "@ai-sdk/provider-utils"
 import type { FetchFunction } from "@ai-sdk/provider-utils"
@@ -20,6 +19,7 @@ import {
   wrapFetchWithQuota,
 } from "./quota"
 import { applyRequestPolicy, type ToolPolicy } from "./request"
+import type { ProviderEmbeddingModel, ProviderImageModel, ProviderLanguageModel } from "./sdk-types"
 import { type ApiMode, parseEndpoint } from "./url"
 import {
   detectOperationMismatch,
@@ -29,6 +29,8 @@ import {
 } from "./provider-errors"
 
 const VERSION = "0.1.0"
+
+type LanguageModel = ProviderLanguageModel
 
 export type AzureFoundryOptions = {
   endpoint?: string
@@ -57,10 +59,13 @@ export type AzureFoundryOptions = {
   name?: string
 }
 
-export type AzureFoundryProvider = ProviderV2 & {
-  (modelId: string): LanguageModelV2
-  chat(modelId: string): LanguageModelV2
-  responses(modelId: string): LanguageModelV2
+export type AzureFoundryProvider = {
+  (modelId: string): LanguageModel
+  languageModel(modelId: string): LanguageModel
+  chat(modelId: string): LanguageModel
+  responses(modelId: string): LanguageModel
+  textEmbeddingModel(modelId: string): ProviderEmbeddingModel
+  imageModel(modelId: string): ProviderImageModel
 }
 
 type Resolved = {
@@ -82,7 +87,7 @@ type Resolved = {
   }) => void
 }
 
-function noModel(modelType: "textEmbeddingModel" | "imageModel", modelId: string): never {
+function noModel(modelType: "embeddingModel" | "imageModel", modelId: string): never {
   throw new NoSuchModelError({
     modelId,
     modelType,
@@ -118,7 +123,7 @@ function isLanguageModelFallbackAllowed(modelMode: ApiMode | undefined): boolean
   return modelMode === undefined
 }
 
-function getModelProviderId(model: LanguageModelV2): string {
+function getModelProviderId(model: LanguageModel): string {
   const provider = model.provider
   if (typeof provider === "string") return provider
   return String(provider)
@@ -206,7 +211,7 @@ export function createAzureFoundryProvider(
     return parsed
   }
 
-  const createChat = (modelId: string) => {
+  const createChat = (modelId: string): LanguageModel => {
     const cfg = get()
     const endpoint = getParsedEndpoint("chat")
     const chatConfig = {
@@ -223,7 +228,7 @@ export function createAzureFoundryProvider(
     })
   }
 
-  const createResponses = (modelId: string) => {
+  const createResponses = (modelId: string): LanguageModel => {
     const cfg = get()
     const endpoint = getParsedEndpoint("responses")
     const responsesConfig = {
@@ -241,7 +246,7 @@ export function createAzureFoundryProvider(
     })
   }
 
-  const createLanguageModel = (modelId: string) => {
+  const createLanguageModel = (modelId: string): LanguageModel => {
     const cfg = get()
     const modelMode = cfg.modelOptions[modelId]?.apiMode
     const endpoint = getParsedEndpoint(modelMode ?? cfg.apiMode)
@@ -275,13 +280,13 @@ export function createAzureFoundryProvider(
     return {
       ...primaryModel,
       provider: getModelProviderId(primaryModel),
-      async doGenerate(options: Parameters<LanguageModelV2["doGenerate"]>[0]) {
+      async doGenerate(options: Parameters<LanguageModel["doGenerate"]>[0]) {
         return tryWithFallback(
           () => primaryModel.doGenerate(options),
           () => fallbackModel.doGenerate(options),
         )
       },
-      async doStream(options: Parameters<LanguageModelV2["doStream"]>[0]) {
+      async doStream(options: Parameters<LanguageModel["doStream"]>[0]) {
         return tryWithFallback(
           () => primaryModel.doStream(options),
           () => fallbackModel.doStream(options),
@@ -294,9 +299,9 @@ export function createAzureFoundryProvider(
   provider.languageModel = createLanguageModel
   provider.chat = createChat
   provider.responses = createResponses
-  provider.textEmbeddingModel = (modelId: string): EmbeddingModelV2<string> =>
-    noModel("textEmbeddingModel", modelId)
-  provider.imageModel = (modelId: string): ImageModelV2 => noModel("imageModel", modelId)
+  provider.textEmbeddingModel = (modelId: string): ProviderEmbeddingModel =>
+    noModel("embeddingModel", modelId)
+  provider.imageModel = (modelId: string): ProviderImageModel => noModel("imageModel", modelId)
 
   return provider
 }

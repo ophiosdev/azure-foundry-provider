@@ -118,6 +118,128 @@ const model = provider.languageModel("DeepSeek-V3.1")
 }
 ```
 
+## Model Variants (Reasoning Effort)
+
+OpenCode supports switching reasoning effort levels (variants) for reasoning-capable models. When configured correctly, the Azure Foundry provider passes variant options through to the model automatically.
+
+### How variants work
+
+- Models with `reasoning: true` expose variant options in OpenCode's UI
+- Variants are passed as `providerOptions` to the model at call time
+
+### Enabling variants in `opencode.json`
+
+#### Option 1: Auto-generated variants
+
+Set `reasoning: true` and the appropriate `npm` value. OpenCode will auto-generate variants based on the npm package:
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "gpt-5.4-mini": {
+          "id": "gpt-5.4-mini",
+          "name": "GPT-5.4 Mini",
+          "reasoning": true,
+          "tool_call": true,
+          "limit": { "context": 128000, "output": 16000 }
+        }
+      },
+      "options": {
+        "endpoint": "https://YOUR-ENDPOINT.services.ai.azure.com/openai/v1/chat/completions",
+        "apiKey": "{env:AZURE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+**Auto-generated variant shapes by npm value:**
+
+| `npm` value                 | Auto-generated variants            | Options per variant                                                                       |
+| --------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------- |
+| `@ai-sdk/openai-compatible` | `low`, `medium`, `high`            | `{ reasoningEffort }`                                                                     |
+| `@ai-sdk/azure`             | `minimal`, `low`, `medium`, `high` | `{ reasoningEffort, reasoningSummary: "auto", include: ["reasoning.encrypted_content"] }` |
+
+#### Option 2: Custom variants
+
+Define variants explicitly in the model config:
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "my-reasoning-model": {
+          "id": "my-reasoning-model",
+          "name": "My Reasoning Model",
+          "reasoning": true,
+          "limit": { "context": 128000, "output": 16000 },
+          "variants": {
+            "low": { "reasoningEffort": "low" },
+            "medium": { "reasoningEffort": "medium" },
+            "high": { "reasoningEffort": "high" },
+            "custom": { "reasoningEffort": "high", "temperature": 0.5 }
+          }
+        }
+      },
+      "options": {
+        "endpoint": "https://YOUR-ENDPOINT.services.ai.azure.com/openai/v1/chat/completions",
+        "apiKey": "{env:AZURE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+### Configuration reference for variants
+
+```json
+{
+  "provider": {
+    "<provider-name>": {
+      "models": {
+        "<model-alias>": {
+          "reasoning": true, // Required to enable variant switching UI
+          "variants": {
+            // Optional: override auto-generated variants
+            "<variant-name>": {
+              // Any valid providerOptions for the model
+              "reasoningEffort": "low|medium|high|minimal"
+              // Additional options as needed
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Key points
+
+1. **`reasoning: true`** — Required to show the variant selector in OpenCode's UI
+2. **`npm` field** — Determines auto-generated variant structure if you don't define custom variants
+3. **Custom variants** — Fully customizable; any fields in the variant object are merged into call options
+4. **No provider changes needed** — The Azure Foundry provider passes `providerOptions` through automatically
+
+### Troubleshooting
+
+**Variants don't appear in OpenCode UI:**
+
+- Ensure `reasoning: true` is set on the model
+- Check that the model is visible in OpenCode's model list
+
+**Variant options don't take effect:**
+
+- Verify the variant name matches what's configured
+- Check that `providerOptions` are being passed (enable `onRetry` callback to inspect)
+
 ### VS Code schema for `opencode.json`
 
 This repo ships a derived OpenCode schema at `schemas/opencode.azure-foundry.schema.json`.

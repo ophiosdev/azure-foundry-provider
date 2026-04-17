@@ -22,7 +22,7 @@
     "@ai-sdk/openai-compatible": "2.0.41",
     "@ai-sdk/provider": "3.0.8",
     "@ai-sdk/provider-utils": "4.0.23",
-    "ai": "6.0.161"
+    "ai": "6.0.168"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

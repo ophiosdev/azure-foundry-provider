@@ -3,9 +3,26 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { describe, expect, test } from "bun:test"
-import { createAzureFoundryProvider } from "../src/provider"
+import { beforeEach, describe, expect, mock, test } from "bun:test"
+import { __test, createAzureFoundryProvider } from "../src/provider"
 import { isChatOperationMismatchError } from "../src/provider-errors"
+
+let defaultCredentialToken = "default-entra-token"
+let defaultCredentialError: Error | undefined
+let defaultCredentialCalls: Array<string | string[]> = []
+
+mock.module("@azure/identity", () => ({
+  DefaultAzureCredential: class DefaultAzureCredential {
+    async getToken(scopes: string | string[]) {
+      defaultCredentialCalls.push(scopes)
+      if (defaultCredentialError) throw defaultCredentialError
+      return {
+        token: defaultCredentialToken,
+        expiresOnTimestamp: Date.now() + 3_600_000,
+      }
+    }
+  },
+}))
 
 function mkJsonResponse(status: number, body: unknown, headers?: Record<string, string>) {
   return new Response(JSON.stringify(body), {
@@ -77,6 +94,12 @@ function mkFetchSequence(sequence: Array<Response | Error>) {
 }
 
 describe("createAzureFoundryProvider", () => {
+  beforeEach(() => {
+    defaultCredentialToken = "default-entra-token"
+    defaultCredentialError = undefined
+    defaultCredentialCalls = []
+  })
+
   test("mismatch detector does not false trigger on oversized responseBody without chat context", () => {
     const huge = "x".repeat(200_000)
     const error = {
@@ -1377,6 +1400,18 @@ describe("createAzureFoundryProvider", () => {
     expect(provider.languageModel("a").provider).toContain("my-provider")
   })
 
+  test("getModelProviderId stringifies non-string provider values", () => {
+    const model = {
+      provider: {
+        toString() {
+          return "object-provider"
+        },
+      },
+    }
+
+    expect(__test.getModelProviderId(model as never)).toBe("object-provider")
+  })
+
   test("timeout false path does not force timeout behavior", async () => {
     const calls: Array<Request> = []
     const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1714,6 +1749,18 @@ describe("createAzureFoundryProvider", () => {
     expect(assistant.reasoning_content).toBeUndefined()
   })
 
+  function fakeCredential(token: string, expectedScope?: string) {
+    return {
+      getToken: async (scopes: string | string[]) => {
+        const scopeList = Array.isArray(scopes) ? scopes : [scopes]
+        if (expectedScope !== undefined) {
+          expect(scopeList).toContain(expectedScope)
+        }
+        return { token, expiresOnTimestamp: Date.now() + 3_600_000 }
+      },
+    }
+  }
+
   test("adaptive ratelimit headers trigger cooldown", async () => {
     const calls: Array<number> = []
 
@@ -1774,5 +1821,518 @@ describe("createAzureFoundryProvider", () => {
     expect(calls.length).toBe(2)
     const delta = calls[1]! - calls[0]!
     expect(delta).toBeGreaterThanOrEqual(15)
+  })
+
+  describe("bearer token auth", () => {
+    test("bearerToken injects Authorization: Bearer <token>", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        bearerToken: "my-static-token",
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("authorization")).toBe("Bearer my-static-token")
+    })
+
+    test("bearerToken does not inject api-key", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        bearerToken: "my-static-token",
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("api-key")).toBeNull()
+    })
+
+    test("explicit headers.Authorization overrides bearerToken", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        bearerToken: "my-static-token",
+        headers: { Authorization: "Bearer explicit-token" },
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("authorization")).toBe("Bearer explicit-token")
+      expect(req.headers.get("api-key")).toBeNull()
+    })
+
+    test("explicit headers['api-key'] overrides bearerToken", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        bearerToken: "my-static-token",
+        headers: { "api-key": "explicit-key" },
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("api-key")).toBe("explicit-key")
+      expect(req.headers.get("authorization")).toBeNull()
+    })
+  })
+
+  describe("bearerTokenProvider auth", () => {
+    test("bearerTokenProvider injects Authorization: Bearer <token>", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        bearerTokenProvider: async () => "dynamic-token",
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("authorization")).toBe("Bearer dynamic-token")
+    })
+
+    test("bearerTokenProvider is not called when explicit auth headers are present", async () => {
+      let providerCalled = false
+      const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        bearerTokenProvider: async () => {
+          providerCalled = true
+          return "dynamic-token"
+        },
+        headers: { Authorization: "Bearer explicit-token" },
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      expect(providerCalled).toBe(false)
+    })
+
+    test("errors from bearerTokenProvider are surfaced clearly", async () => {
+      const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        bearerTokenProvider: async () => {
+          throw new Error("token provider failed")
+        },
+        fetch: fetchFn,
+      })
+
+      await expect(
+        provider.languageModel("gpt-4.1").doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        }),
+      ).rejects.toThrow("token provider failed")
+    })
+  })
+
+  describe("entraId auth", () => {
+    test("entraId with fake credential injects Authorization: Bearer <token>", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {
+          credential: fakeCredential("entra-token"),
+        },
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("authorization")).toBe("Bearer entra-token")
+    })
+
+    test("entraId.scope is passed through to the credential", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {
+          credential: fakeCredential("entra-token", "https://custom.scope/.default"),
+          scope: "https://custom.scope/.default",
+        },
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("authorization")).toBe("Bearer entra-token")
+    })
+
+    test("explicit auth headers prevent Entra token acquisition", async () => {
+      let credentialCalled = false
+      const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {
+          credential: {
+            getToken: async () => {
+              credentialCalled = true
+              return { token: "should-not-be-used", expiresOnTimestamp: Date.now() + 3600000 }
+            },
+          },
+        },
+        headers: { Authorization: "Bearer explicit-token" },
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      expect(credentialCalled).toBe(false)
+    })
+
+    test("Entra credential failure is surfaced clearly", async () => {
+      const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {
+          credential: {
+            getToken: async () => {
+              throw new Error("credential failed")
+            },
+          },
+        },
+        fetch: fetchFn,
+      })
+
+      await expect(
+        provider.languageModel("gpt-4.1").doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        }),
+      ).rejects.toThrow("credential failed")
+    })
+
+    test("default credential path uses provider default scope when scope is omitted", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {},
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("authorization")).toBe("Bearer default-entra-token")
+      expect(defaultCredentialCalls).toEqual(["https://ai.azure.com/.default"])
+    })
+
+    test("default credential path uses configured entraId.scope", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {
+          scope: "https://custom.scope/.default",
+        },
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gpt-4.1").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })
+
+      const req = calls[0]!
+      expect(req.headers.get("authorization")).toBe("Bearer default-entra-token")
+      expect(defaultCredentialCalls).toEqual(["https://custom.scope/.default"])
+    })
+  })
+
+  describe("implicit Entra fallback", () => {
+    test("implicit Entra fallback is used when no apiKey and no AZURE_API_KEY are configured", async () => {
+      const prevKey = process.env["AZURE_API_KEY"]
+      delete process.env["AZURE_API_KEY"]
+
+      try {
+        const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+        const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+        const provider = createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          fetch: fetchFn,
+        })
+
+        await provider.languageModel("gpt-4.1").doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })
+
+        expect(defaultCredentialCalls).toEqual(["https://ai.azure.com/.default"])
+      } finally {
+        if (prevKey !== undefined) process.env["AZURE_API_KEY"] = prevKey
+      }
+    })
+
+    test("implicit Entra fallback surfaces DefaultAzureCredential failure clearly", async () => {
+      const prevKey = process.env["AZURE_API_KEY"]
+      delete process.env["AZURE_API_KEY"]
+      defaultCredentialError = new Error("default credential failed")
+
+      try {
+        const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+        const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+        const provider = createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          fetch: fetchFn,
+        })
+
+        await expect(
+          provider.languageModel("gpt-4.1").doGenerate({
+            prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+          }),
+        ).rejects.toThrow("default credential failed")
+
+        expect(defaultCredentialCalls).toEqual(["https://ai.azure.com/.default"])
+      } finally {
+        if (prevKey !== undefined) process.env["AZURE_API_KEY"] = prevKey
+      }
+    })
+
+    test("implicit Entra fallback is not used when apiKey is configured", async () => {
+      const prevKey = process.env["AZURE_API_KEY"]
+      delete process.env["AZURE_API_KEY"]
+
+      try {
+        const calls: Array<Request> = []
+        const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+          calls.push(new Request(input, init))
+          return mkChatOkResponse("gpt-4.1")
+        }
+        const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+        const provider = createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          apiKey: "configured-key",
+          fetch: fetchFn,
+        })
+
+        await provider.languageModel("gpt-4.1").doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })
+
+        const req = calls[0]!
+        expect(req.headers.get("api-key")).toBe("configured-key")
+      } finally {
+        if (prevKey !== undefined) process.env["AZURE_API_KEY"] = prevKey
+      }
+    })
+
+    test("implicit Entra fallback is not used when AZURE_API_KEY is available", async () => {
+      const prevKey = process.env["AZURE_API_KEY"]
+      process.env["AZURE_API_KEY"] = "env-key"
+
+      try {
+        const calls: Array<Request> = []
+        const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+          calls.push(new Request(input, init))
+          return mkChatOkResponse("gpt-4.1")
+        }
+        const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+
+        const provider = createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          fetch: fetchFn,
+        })
+
+        await provider.languageModel("gpt-4.1").doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })
+
+        const req = calls[0]!
+        expect(req.headers.get("api-key")).toBe("env-key")
+      } finally {
+        if (prevKey !== undefined) process.env["AZURE_API_KEY"] = prevKey
+        else delete process.env["AZURE_API_KEY"]
+      }
+    })
+  })
+
+  describe("invalid auth config", () => {
+    test("apiKey plus bearerToken throws", () => {
+      expect(() =>
+        createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          apiKey: "k",
+          bearerToken: "t",
+        }),
+      ).toThrow()
+    })
+
+    test("apiKey plus bearerTokenProvider throws", () => {
+      expect(() =>
+        createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          apiKey: "k",
+          bearerTokenProvider: async () => "t",
+        }),
+      ).toThrow()
+    })
+
+    test("apiKey plus entraId throws", () => {
+      expect(() =>
+        createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          apiKey: "k",
+          entraId: { credential: fakeCredential("t") },
+        }),
+      ).toThrow()
+    })
+
+    test("bearerToken plus bearerTokenProvider throws", () => {
+      expect(() =>
+        createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          bearerToken: "t",
+          bearerTokenProvider: async () => "t",
+        }),
+      ).toThrow()
+    })
+
+    test("bearerToken plus entraId throws", () => {
+      expect(() =>
+        createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          bearerToken: "t",
+          entraId: { credential: fakeCredential("t") },
+        }),
+      ).toThrow()
+    })
+
+    test("bearerTokenProvider plus entraId throws", () => {
+      expect(() =>
+        createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          bearerTokenProvider: async () => "t",
+          entraId: { credential: fakeCredential("t") },
+        }),
+      ).toThrow()
+    })
+
+    test("explicit auth headers do not trigger validation errors", () => {
+      expect(() =>
+        createAzureFoundryProvider({
+          endpoint:
+            "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+          apiKey: "k",
+          bearerToken: "t",
+          headers: { Authorization: "Bearer explicit" },
+        }),
+      ).not.toThrow()
+    })
   })
 })

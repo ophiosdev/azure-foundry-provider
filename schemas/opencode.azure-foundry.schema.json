@@ -111,6 +111,21 @@
         "name": {
           "type": "string",
           "description": "Optional provider id prefix used for diagnostics. Defaults to azure-foundry."
+        },
+        "bearerToken": {
+          "type": "string",
+          "description": "Static bearer token for Authorization: Bearer header. Runtime-only options such as bearerTokenProvider and entraId.credential are also available but not representable in JSON schema."
+        },
+        "entraId": {
+          "type": "object",
+          "description": "Microsoft Entra ID authentication options. Only the scope field is JSON-safe; entraId.credential is runtime-only.",
+          "properties": {
+            "scope": {
+              "type": "string",
+              "description": "Token scope for Entra ID authentication. Defaults to https://ai.azure.com/.default."
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": true

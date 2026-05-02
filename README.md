@@ -315,6 +315,12 @@ type AzureFoundryOptions = {
   onFallback?: (event: FallbackEvent) => void
   fetch?: FetchFunction
   name?: string
+  bearerToken?: string
+  bearerTokenProvider?: () => Promise<string> | string
+  entraId?: {
+    credential?: TokenCredential
+    scope?: string
+  }
 }
 ```
 
@@ -531,8 +537,32 @@ Use callbacks to turn runtime observations into explicit config:
 Priority:
 
 1. Use `headers.Authorization` or `headers["api-key"]` if explicitly provided.
-2. Else inject `api-key` from `apiKey` option.
-3. Else inject `api-key` from `AZURE_API_KEY`.
+2. Else `bearerToken` sends `Authorization: Bearer <token>`.
+3. Else `bearerTokenProvider` resolves a token and sends `Authorization: Bearer <token>`.
+4. Else `entraId` acquires a token via the provided credential (or `DefaultAzureCredential`) and sends `Authorization: Bearer <token>`.
+5. Else inject `api-key` from `apiKey` option.
+6. Else inject `api-key` from `AZURE_API_KEY`.
+7. Else attempt implicit Entra auth with `DefaultAzureCredential()` and provider default scope `https://ai.azure.com/.default`.
+
+Explicit auth headers (step 1) always win and skip all provider-managed auth. Only one provider-managed auth source may be active at a time; configuring more than one throws an actionable error.
+
+When no auth source reaches the provider (no explicit headers, no `bearerToken`, no `bearerTokenProvider`, no `entraId`, no `apiKey`, and no `AZURE_API_KEY`), the provider automatically attempts Microsoft Entra ID authentication with `DefaultAzureCredential()`. This makes endpoint-only configs work without requiring any credential setup in OpenCode JSON.
+
+### Auth option details
+
+- `bearerToken`:
+  - Static bearer token string.
+  - Provider sends `Authorization: Bearer <bearerToken>`.
+  - JSON-safe and usable from OpenCode config.
+- `bearerTokenProvider`:
+  - Function returning a token string or a `Promise<string>`.
+  - Called when building the request auth header.
+  - Runtime-only; not representable in JSON schema.
+- `entraId`:
+  - Provider-managed Microsoft Entra ID authentication.
+  - `credential`: optional `TokenCredential` implementation. If omitted, `DefaultAzureCredential()` is created lazily.
+  - `scope`: optional token scope. Defaults to `https://ai.azure.com/.default`.
+  - `entraId` is JSON-safe only for the `scope` field; `credential` is runtime-only.
 
 `User-Agent` suffix is automatically appended as `azure-foundry-provider/<version>`.
 
@@ -1524,10 +1554,69 @@ Global `apiMode` controls the first attempt for models without a per-model overr
 }
 ```
 
+### 24) Static bearer token
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  bearerToken: process.env.AZURE_BEARER_TOKEN,
+})
+```
+
+### 25) Token provider callback
+
+```ts
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  bearerTokenProvider: async () => {
+    return await acquireTokenFromYourIdentitySystem()
+  },
+})
+```
+
+### 26) DefaultAzureCredential (Entra ID)
+
+```ts
+import { DefaultAzureCredential } from "@azure/identity"
+
+const provider = createAzureFoundryProvider({
+  endpoint: process.env.AZURE_FOUNDRY_ENDPOINT!,
+  entraId: {
+    credential: new DefaultAzureCredential(),
+    scope: "https://ai.azure.com/.default",
+  },
+})
+```
+
+### 27) OpenCode/Kilo JSON: Endpoint-only config with implicit Entra auth
+
+```json
+{
+  "provider": {
+    "azure-foundry": {
+      "name": "Azure Foundry",
+      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": {
+        "deepseek-v3.1": {
+          "id": "DeepSeek-V3.1",
+          "name": "DeepSeek V3.1"
+        }
+      },
+      "options": {
+        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
+        "apiMode": "chat"
+      }
+    }
+  }
+}
+```
+
+When no auth source is configured, the provider implicitly uses `DefaultAzureCredential()`-based Entra auth. This means OpenCode users do not need to set `apiKey` or `bearerToken` when running in an Azure environment with managed identity.
+
 ## Environment variables
 
 - `AZURE_FOUNDRY_ENDPOINT`: fallback for `options.endpoint`
-- `AZURE_API_KEY`: fallback for `options.apiKey`
+- `AZURE_API_KEY`: fallback for `options.apiKey`; when present, implicit Entra fallback is not used
 
 ## Troubleshooting
 

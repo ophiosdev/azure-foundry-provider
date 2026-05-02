@@ -18,12 +18,12 @@
     "format:staged": "prettier --write"
   },
   "dependencies": {
-    "@ai-sdk/openai": "3.0.53",
-    "@ai-sdk/openai-compatible": "2.0.41",
-    "@ai-sdk/provider": "3.0.8",
-    "@ai-sdk/provider-utils": "4.0.23",
-    "@azure/identity": "4.9.1",
-    "ai": "6.0.168"
+    "@ai-sdk/openai": "3.0.58",
+    "@ai-sdk/openai-compatible": "2.0.45",
+    "@ai-sdk/provider": "3.0.10",
+    "@ai-sdk/provider-utils": "4.0.26",
+    "@azure/identity": "4.13.1",
+    "ai": "6.0.174"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

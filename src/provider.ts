@@ -32,6 +32,18 @@ const VERSION = "0.1.0"
 
 type LanguageModel = ProviderLanguageModel
 
+export type TokenCredential = {
+  getToken(
+    scopes: string | string[],
+    options?: unknown,
+  ): Promise<{ token: string; expiresOnTimestamp?: number }>
+}
+
+export type EntraIdOptions = {
+  credential?: TokenCredential
+  scope?: string
+}
+
 export type AzureFoundryOptions = {
   endpoint?: string
   apiKey?: string
@@ -57,6 +69,9 @@ export type AzureFoundryOptions = {
   }) => void
   fetch?: FetchFunction
   name?: string
+  bearerToken?: string
+  bearerTokenProvider?: () => Promise<string> | string
+  entraId?: EntraIdOptions
 }
 
 export type AzureFoundryProvider = {
@@ -129,6 +144,68 @@ function getModelProviderId(model: LanguageModel): string {
   return String(provider)
 }
 
+function validateAuthOptions(options: AzureFoundryOptions): void {
+  const explicit = options.headers ?? {}
+  if (hasAuthHeader(explicit)) return
+
+  const configured = [
+    options.bearerToken ? "bearerToken" : null,
+    options.bearerTokenProvider ? "bearerTokenProvider" : null,
+    options.entraId ? "entraId" : null,
+    options.apiKey ? "apiKey" : null,
+  ].filter((x): x is string => x !== null)
+
+  if (configured.length > 1) {
+    throw new Error(
+      `Conflicting auth configuration: only one provider-managed auth source may be configured. Received: ${configured.join(", ")}`,
+    )
+  }
+}
+
+function hasAsyncAuthSource(options: AzureFoundryOptions): boolean {
+  const explicit = options.headers ?? {}
+  if (hasAuthHeader(explicit)) return false
+
+  return !!(
+    options.bearerTokenProvider ||
+    options.entraId ||
+    (!options.bearerToken && !options.apiKey && !process.env["AZURE_API_KEY"])
+  )
+}
+
+function wrapFetchWithAuth(fetchFn: FetchFunction, options: AzureFoundryOptions): FetchFunction {
+  if (!hasAsyncAuthSource(options)) return fetchFn
+
+  const wrapped = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers)
+
+    if (headers.has("Authorization") || headers.has("api-key")) {
+      return fetchFn(input, init)
+    }
+
+    let token: string
+
+    if (options.bearerTokenProvider) {
+      token = await options.bearerTokenProvider()
+    } else if (options.entraId?.credential) {
+      const scope = options.entraId.scope ?? "https://ai.azure.com/.default"
+      const result = await options.entraId.credential.getToken(scope)
+      token = result.token
+    } else {
+      const scope = options.entraId?.scope ?? "https://ai.azure.com/.default"
+      const identity = await import("@azure/identity")
+      const credential = new identity.DefaultAzureCredential()
+      const result = await credential.getToken(scope)
+      token = result.token
+    }
+
+    headers.set("Authorization", `Bearer ${token}`)
+    return fetchFn(input, { ...init, headers })
+  }
+
+  return Object.assign(wrapped, { preconnect: fetchFn.preconnect }) as FetchFunction
+}
+
 function resolve(options: AzureFoundryOptions): Resolved {
   const endpoint = loadSetting({
     settingValue: options.endpoint,
@@ -152,28 +229,42 @@ function resolve(options: AzureFoundryOptions): Resolved {
     ...(options.onSanitizedRetry ? { onSanitizedRetry: options.onSanitizedRetry } : {}),
   }
 
-  const resolvedFetch = wrapFetchWithQuota(timeoutFetch ?? globalThis.fetch, policy)
+  let resolvedFetch = wrapFetchWithQuota(timeoutFetch ?? globalThis.fetch, policy)
+  resolvedFetch = wrapFetchWithAuth(resolvedFetch, options)
   const name = options.name ?? "azure-foundry"
 
   const headers = () => {
     const explicit = options.headers ?? {}
     const useExplicitAuth = hasAuthHeader(explicit)
-    const apiKey = useExplicitAuth
-      ? undefined
-      : loadApiKey({
-          apiKey: options.apiKey,
-          environmentVariableName: "AZURE_API_KEY",
-          apiKeyParameterName: "apiKey",
-          description: "Azure Foundry",
-        })
+    if (useExplicitAuth) {
+      return withUserAgentSuffix(explicit, `azure-foundry-provider/${VERSION}`)
+    }
 
-    return withUserAgentSuffix(
-      {
-        ...(apiKey ? { "api-key": apiKey } : {}),
-        ...explicit,
-      },
-      `azure-foundry-provider/${VERSION}`,
-    )
+    if (options.bearerToken) {
+      return withUserAgentSuffix(
+        { Authorization: `Bearer ${options.bearerToken}`, ...explicit },
+        `azure-foundry-provider/${VERSION}`,
+      )
+    }
+
+    if (options.bearerTokenProvider || options.entraId) {
+      return withUserAgentSuffix(explicit, `azure-foundry-provider/${VERSION}`)
+    }
+
+    if (options.apiKey || process.env["AZURE_API_KEY"]) {
+      const apiKey = loadApiKey({
+        apiKey: options.apiKey,
+        environmentVariableName: "AZURE_API_KEY",
+        apiKeyParameterName: "apiKey",
+        description: "Azure Foundry",
+      })
+      return withUserAgentSuffix(
+        { "api-key": apiKey, ...explicit },
+        `azure-foundry-provider/${VERSION}`,
+      )
+    }
+
+    return withUserAgentSuffix(explicit, `azure-foundry-provider/${VERSION}`)
   }
 
   return {
@@ -191,6 +282,8 @@ function resolve(options: AzureFoundryOptions): Resolved {
 export function createAzureFoundryProvider(
   options: AzureFoundryOptions = {},
 ): AzureFoundryProvider {
+  validateAuthOptions(options)
+
   let state: Resolved | undefined
   const parsedEndpointByMode: Partial<
     Record<"chat" | "responses" | "auto", ReturnType<typeof parseEndpoint>>
@@ -314,4 +407,5 @@ export const __test = {
   isChatOperationMismatchError,
   isLanguageModelFallbackAllowed,
   getFallbackTargetMode,
+  getModelProviderId,
 }

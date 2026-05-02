@@ -6,7 +6,12 @@
 import { createAzureFoundryProvider } from "./provider"
 
 export { createAzureFoundryProvider } from "./provider"
-export type { AzureFoundryOptions, AzureFoundryProvider } from "./provider"
+export type {
+  AzureFoundryOptions,
+  AzureFoundryProvider,
+  EntraIdOptions,
+  TokenCredential,
+} from "./provider"
 
 export { parseEndpoint } from "./url"
 export type { ApiMode, HostType, ParsedEndpoint, PathType } from "./url"

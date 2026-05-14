@@ -41,7 +41,7 @@ function wrapFetch(
 
   return Object.assign(wrapped, {
     preconnect: fetch.preconnect,
-  }) as FetchFunction
+  })
 }
 
 export { hasAuthHeader, mergeSignals, wrapFetch }

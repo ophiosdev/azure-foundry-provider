@@ -203,7 +203,7 @@ function wrapFetchWithAuth(fetchFn: FetchFunction, options: AzureFoundryOptions)
     return fetchFn(input, { ...init, headers })
   }
 
-  return Object.assign(wrapped, { preconnect: fetchFn.preconnect }) as FetchFunction
+  return Object.assign(wrapped, { preconnect: fetchFn.preconnect })
 }
 
 function resolve(options: AzureFoundryOptions): Resolved {

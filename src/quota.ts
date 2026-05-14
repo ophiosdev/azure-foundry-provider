@@ -779,7 +779,7 @@ export function wrapFetchWithQuota(
 
   return Object.assign(wrapped, {
     preconnect: fetchFn.preconnect,
-  }) as FetchFunction
+  })
 }
 
 export const __test = {

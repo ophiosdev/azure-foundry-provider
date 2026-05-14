@@ -21,7 +21,7 @@
     "@ai-sdk/openai": "3.0.63",
     "@ai-sdk/openai-compatible": "2.0.45",
     "@ai-sdk/provider": "3.0.10",
-    "@ai-sdk/provider-utils": "4.0.26",
+    "@ai-sdk/provider-utils": "4.0.27",
     "@azure/identity": "4.13.1",
     "ai": "6.0.174"
   },

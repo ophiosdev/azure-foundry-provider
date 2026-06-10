@@ -4,6 +4,9 @@
   "type": "module",
   "private": true,
   "description": "AI SDK provider for Azure AI Foundry and Azure OpenAI with intelligent endpoint routing, adaptive throttling, and operation-mismatch fallback recovery",
+  "workspaces": [
+    "packages/*"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },

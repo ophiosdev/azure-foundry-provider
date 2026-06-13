@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@azure/arm-cognitiveservices": "^8.1.0",
+    "@azure/core-auth": "^1.10.1",
     "@azure/identity": "^4.13.0",
     "@inquirer/prompts": "^8.0.0",
     "ejs": "^6.0.0",

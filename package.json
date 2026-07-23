@@ -26,7 +26,7 @@
     "@ai-sdk/provider": "3.0.14",
     "@ai-sdk/provider-utils": "4.0.38",
     "@azure/identity": "4.13.1",
-    "ai": "6.0.222"
+    "ai": "7.0.37"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

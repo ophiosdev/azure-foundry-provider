@@ -21,12 +21,12 @@
     "format:staged": "prettier --write"
   },
   "dependencies": {
-    "@ai-sdk/openai": "3.0.90",
-    "@ai-sdk/openai-compatible": "2.0.63",
+    "@ai-sdk/openai": "3.0.91",
+    "@ai-sdk/openai-compatible": "2.0.64",
     "@ai-sdk/provider": "3.0.14",
-    "@ai-sdk/provider-utils": "4.0.41",
+    "@ai-sdk/provider-utils": "4.0.42",
     "@azure/identity": "4.13.1",
-    "ai": "6.0.238"
+    "ai": "6.0.246"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

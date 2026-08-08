@@ -21,7 +21,7 @@
     "format:staged": "prettier --write"
   },
   "dependencies": {
-    "@ai-sdk/openai": "3.0.91",
+    "@ai-sdk/openai": "4.0.36",
     "@ai-sdk/openai-compatible": "2.0.64",
     "@ai-sdk/provider": "3.0.14",
     "@ai-sdk/provider-utils": "4.0.42",

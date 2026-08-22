@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "3.0.96",
-    "@ai-sdk/openai-compatible": "2.0.67",
+    "@ai-sdk/openai-compatible": "3.0.35",
     "@ai-sdk/provider": "3.0.15",
     "@ai-sdk/provider-utils": "4.0.45",
     "@azure/identity": "4.13.1",

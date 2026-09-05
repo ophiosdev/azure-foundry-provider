@@ -21,16 +21,16 @@
     "format:staged": "prettier --write"
   },
   "dependencies": {
-    "@ai-sdk/openai": "3.0.96",
-    "@ai-sdk/openai-compatible": "2.0.67",
+    "@ai-sdk/openai": "3.0.109",
+    "@ai-sdk/openai-compatible": "2.0.74",
     "@ai-sdk/provider": "3.0.15",
-    "@ai-sdk/provider-utils": "4.0.45",
-    "@azure/identity": "4.13.1",
-    "ai": "6.0.253"
+    "@ai-sdk/provider-utils": "4.0.50",
+    "@azure/identity": "4.13.2",
+    "ai": "6.0.277"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/bun": "1.3.14",
+    "@types/bun": "1.4.1",
     "eslint": "^10.3.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-license-header": "^0.9.0",

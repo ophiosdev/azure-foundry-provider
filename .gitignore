@@ -53,3 +53,6 @@ pids
 bun.lockb
 .history/
 .opencode
+
+# Graphify
+graphify*

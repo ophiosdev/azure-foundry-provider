@@ -318,6 +318,7 @@ export function createAzureFoundryProvider(
     return applyRequestPolicy(model, {
       mode: "chat",
       toolPolicy: cfg.toolPolicy,
+      providerName: cfg.name,
     })
   }
 
@@ -336,6 +337,7 @@ export function createAzureFoundryProvider(
     return applyRequestPolicy(model, {
       mode: "responses",
       toolPolicy: cfg.toolPolicy,
+      providerName: cfg.name,
     })
   }
 

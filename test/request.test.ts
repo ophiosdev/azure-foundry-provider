@@ -246,4 +246,106 @@ describe("applyRequestPolicy", () => {
     const first = await reader.read()
     expect(first.value?.type).toBe("stream-start")
   })
+
+  test("removes V2 factory settings while preserving chat request options", async () => {
+    const { model, calls } = mockModel()
+    const wrapped = applyRequestPolicy(model, {
+      mode: "chat",
+      toolPolicy: "auto",
+      providerName: "azure-foundry",
+    })
+
+    await wrapped.doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      providerOptions: {
+        "azure-foundry": {
+          endpoint: "https://example.com/openai/v1",
+          apiKey: "never-send-this",
+          headers: { Authorization: "Bearer never-send-this" },
+          apiMode: "responses",
+          toolPolicy: "off",
+          quota: { retry: { maxAttempts: 1 } },
+          modelOptions: { "gpt-5.4": { apiMode: "responses" } },
+          reasoningEffort: "high",
+          customWireOption: "keep-me",
+        },
+      },
+    })
+
+    const call = calls[0]
+    if (!call) throw new Error("missing call")
+    expect(call.providerOptions).toEqual({
+      "azure-foundry": {
+        reasoningEffort: "high",
+        customWireOption: "keep-me",
+      },
+    })
+  })
+
+  test("maps V2 Responses options and preserves explicit Azure options", async () => {
+    const { model, calls } = mockModel()
+    const wrapped = applyRequestPolicy(model, {
+      mode: "responses",
+      toolPolicy: "auto",
+      providerName: "azure-foundry",
+    })
+    const providerOptions = {
+      "azure-foundry": {
+        endpoint: "https://example.com/openai/v1",
+        apiMode: "responses",
+        reasoningEffort: "high",
+        customOption: "keep-me",
+      },
+      azure: {
+        reasoningEffort: "low",
+        store: false,
+      },
+      openai: {
+        parallelToolCalls: false,
+      },
+    }
+
+    await wrapped.doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      providerOptions,
+    })
+
+    const call = calls[0]
+    if (!call) throw new Error("missing call")
+    expect(call.providerOptions).toEqual({
+      azure: {
+        reasoningEffort: "low",
+        store: false,
+        customOption: "keep-me",
+      },
+      openai: {
+        parallelToolCalls: false,
+      },
+    })
+    expect(providerOptions["azure-foundry"]).toHaveProperty("endpoint")
+  })
+
+  test("maps V2 Responses options to OpenAI namespace for non-Azure providers", async () => {
+    const { model, calls } = mockModel()
+    const wrapped = applyRequestPolicy(model, {
+      mode: "responses",
+      toolPolicy: "auto",
+      providerName: "company-ai",
+    })
+
+    await wrapped.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      providerOptions: {
+        "company-ai": {
+          reasoningEffort: "high",
+        },
+      },
+    })
+
+    expect(calls[0]?.providerOptions).toEqual({
+      openai: {
+        reasoningEffort: "high",
+      },
+    })
+  })
 })

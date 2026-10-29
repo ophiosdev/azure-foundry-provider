@@ -85,25 +85,28 @@ const provider = createAzureFoundryProvider({
 const model = provider.languageModel("DeepSeek-V3.1")
 ```
 
-## OpenCode/Kilo integration example
+## OpenCode V2 integration
 
 ```json
 {
-  "provider": {
+  "providers": {
     "azure-foundry": {
       "name": "Azure Foundry",
-      "npm": "file:///usr/local/bun/providers/azure-foundry-provider/src/index.ts",
+      "package": "aisdk:file:///usr/local/provider/azure-foundry-provider/index.js",
       "models": {
         "deepseek-v3.1": {
-          "id": "DeepSeek-V3.1",
+          "modelID": "DeepSeek-V3.1",
           "name": "DeepSeek V3.1",
-          "tool_call": false,
-          "reasoning": false,
-          "limit": { "context": 64000, "output": 1024 },
-          "modalities": { "input": ["text"], "output": ["text"] }
+          "capabilities": {
+            "tools": false,
+            "reasoning": { "supported": false },
+            "input": ["text"],
+            "output": ["text"]
+          },
+          "limit": { "context": 64000, "output": 1024 }
         }
       },
-      "options": {
+      "settings": {
         "endpoint": "https://<id>.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview",
         "apiKey": "{env:AZURE_API_KEY}",
         "timeout": 90000,
@@ -120,35 +123,41 @@ const model = provider.languageModel("DeepSeek-V3.1")
 
 ## Model Variants (Reasoning Effort)
 
-OpenCode supports switching reasoning effort levels (variants) for reasoning-capable models. When configured correctly, the Azure Foundry provider passes variant options through to the model automatically.
+OpenCode V2 supports reasoning variants for custom providers when configured explicitly. Azure Foundry consumes `reasoningEffort` from each variant's `settings`.
 
 ### How variants work
 
-- Models with `reasoning: true` expose variant options in OpenCode's UI
-- Variants are passed as `providerOptions` to the model at call time
+- Set `capabilities.reasoning.supported` to `true` to describe model reasoning support.
+- Define custom variants as an array with `id` and `settings` fields.
+- V2 does not generate reasoning variants automatically for arbitrary custom package IDs.
 
-### Enabling variants in `opencode.json`
-
-#### Option 1: Auto-generated variants
-
-Set `reasoning: true` and the appropriate `npm` value. OpenCode will auto-generate variants based on the npm package:
+### Defining variants in `opencode.json`
 
 ```json
 {
-  "provider": {
+  "providers": {
     "azure-foundry": {
       "name": "Azure Foundry",
-      "npm": "@ai-sdk/openai-compatible",
+      "package": "aisdk:file:///usr/local/provider/azure-foundry-provider/index.js",
       "models": {
         "gpt-5.4-mini": {
-          "id": "gpt-5.4-mini",
+          "modelID": "gpt-5.4-mini",
           "name": "GPT-5.4 Mini",
-          "reasoning": true,
-          "tool_call": true,
-          "limit": { "context": 128000, "output": 16000 }
+          "capabilities": {
+            "tools": true,
+            "reasoning": { "supported": true, "effort": ["low", "medium", "high"] },
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": { "context": 128000, "output": 16000 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         }
       },
-      "options": {
+      "settings": {
         "endpoint": "https://YOUR-ENDPOINT.services.ai.azure.com/openai/v1/chat/completions",
         "apiKey": "{env:AZURE_API_KEY}"
       }
@@ -157,38 +166,31 @@ Set `reasoning: true` and the appropriate `npm` value. OpenCode will auto-genera
 }
 ```
 
-**Auto-generated variant shapes by npm value:**
-
-| `npm` value                 | Auto-generated variants            | Options per variant                                                                       |
-| --------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------- |
-| `@ai-sdk/openai-compatible` | `low`, `medium`, `high`            | `{ reasoningEffort }`                                                                     |
-| `@ai-sdk/azure`             | `minimal`, `low`, `medium`, `high` | `{ reasoningEffort, reasoningSummary: "auto", include: ["reasoning.encrypted_content"] }` |
-
-#### Option 2: Custom variants
-
-Define variants explicitly in the model config:
+Additional variants can add other AI SDK provider settings:
 
 ```json
 {
-  "provider": {
+  "providers": {
     "azure-foundry": {
       "name": "Azure Foundry",
-      "npm": "@ai-sdk/openai-compatible",
+      "package": "aisdk:file:///usr/local/provider/azure-foundry-provider/index.js",
       "models": {
         "my-reasoning-model": {
-          "id": "my-reasoning-model",
+          "modelID": "my-reasoning-model",
           "name": "My Reasoning Model",
-          "reasoning": true,
+          "capabilities": {
+            "reasoning": { "supported": true, "effort": ["low", "medium", "high"] }
+          },
           "limit": { "context": 128000, "output": 16000 },
-          "variants": {
-            "low": { "reasoningEffort": "low" },
-            "medium": { "reasoningEffort": "medium" },
-            "high": { "reasoningEffort": "high" },
-            "custom": { "reasoningEffort": "high", "temperature": 0.5 }
-          }
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "custom", "settings": { "reasoningEffort": "high", "temperature": 0.5 } }
+          ]
         }
       },
-      "options": {
+      "settings": {
         "endpoint": "https://YOUR-ENDPOINT.services.ai.azure.com/openai/v1/chat/completions",
         "apiKey": "{env:AZURE_API_KEY}"
       }
@@ -201,19 +203,14 @@ Define variants explicitly in the model config:
 
 ```json
 {
-  "provider": {
+  "providers": {
     "<provider-name>": {
       "models": {
         "<model-alias>": {
-          "reasoning": true, // Required to enable variant switching UI
-          "variants": {
-            // Optional: override auto-generated variants
-            "<variant-name>": {
-              // Any valid providerOptions for the model
-              "reasoningEffort": "low|medium|high|minimal"
-              // Additional options as needed
-            }
-          }
+          "capabilities": { "reasoning": { "supported": true } },
+          "variants": [
+            { "id": "<variant-name>", "settings": { "reasoningEffort": "low" } }
+          ]
         }
       }
     }
@@ -223,16 +220,15 @@ Define variants explicitly in the model config:
 
 ### Key points
 
-1. **`reasoning: true`** — Required to show the variant selector in OpenCode's UI
-2. **`npm` field** — Determines auto-generated variant structure if you don't define custom variants
-3. **Custom variants** — Fully customizable; any fields in the variant object are merged into call options
-4. **No provider changes needed** — The Azure Foundry provider passes `providerOptions` through automatically
+1. **`capabilities.reasoning.supported: true`** — Enables reasoning support in model metadata.
+2. **Explicit variants** — Custom provider package IDs do not receive generated reasoning variants.
+3. **Variant settings** — OpenCode V2 passes each variant's settings through provider options; Azure Foundry maps them to the OpenAI SDK namespace.
 
 ### Troubleshooting
 
 **Variants don't appear in OpenCode UI:**
 
-- Ensure `reasoning: true` is set on the model
+- Ensure `capabilities.reasoning.supported` is `true` and explicit variants exist.
 - Check that the model is visible in OpenCode's model list
 
 **Variant options don't take effect:**
@@ -243,7 +239,7 @@ Define variants explicitly in the model config:
 ### VS Code schema for `opencode.json`
 
 This repo ships a derived OpenCode schema at `schemas/opencode.azure-foundry.schema.json`.
-It composes with the upstream OpenCode schema at `https://opencode.ai/config.json` and adds IntelliSense for Azure Foundry provider entries whose `npm` value contains `azure-foundry-provider`.
+It composes with the upstream OpenCode V2 schema at `https://opencode.ai/config.json` and adds IntelliSense for `providers.*` entries whose `package` contains `azure-foundry-provider`.
 
 Use it by pointing your local config at the schema file:
 
@@ -268,7 +264,7 @@ Or map it in `.vscode/settings.json`:
 
 Notes:
 
-- The derived schema keeps upstream OpenCode validation and only narrows `provider.<name>.options` for Azure Foundry provider entries.
+- The derived schema keeps upstream OpenCode validation and narrows `providers.<name>.settings` for Azure Foundry provider entries.
 - Runtime-only options such as `fetch` and callback hooks are intentionally omitted because they are not JSON-serializable OpenCode config values.
 - `modelOptions` and `quota.models` are keyed by the runtime model id the provider receives. OpenCode examples may use aliases or ids, so treat those keys carefully.
 - Endpoint semantics such as `/openai/v1` requiring effective `apiMode` and `/models/chat/completions` requiring `api-version` are documented in schema descriptions, but JSON Schema cannot fully enforce all runtime constraints.
@@ -277,7 +273,7 @@ Notes:
 
 ### `createAzureFoundryProvider(options?)`
 
-Creates a provider that implements AI SDK `ProviderV2` plus convenience methods:
+Creates a provider whose model accessors return AI SDK `LanguageModelV3` instances, plus convenience methods:
 
 - `provider(modelId)`
 - `provider.languageModel(modelId)`
@@ -1312,76 +1308,56 @@ This pattern is useful when a provider points to a single v1 base root but indiv
 
 Global `apiMode` controls the first attempt for models without a per-model override. If a model has `modelOptions[modelId].apiMode`, that per-model mode is strict for that model and disables automatic cross-transport recovery.
 
-### 16) OpenCode/Kilo JSON: Basic quota settings
+### 16) OpenCode V2: Basic quota settings
+
+Use V2 `providers`, `package`, and `settings` fields. The model map key is its OpenCode ID; `modelID` is the Azure deployment ID received by the provider.
 
 ```json
 {
-  "provider": {
+  "providers": {
     "azure-foundry": {
       "name": "Azure Foundry",
-      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "package": "aisdk:file:///usr/local/provider/azure-foundry-provider/index.js",
       "models": {
         "deepseek-v3.1": {
-          "id": "DeepSeek-V3.1",
-          "name": "DeepSeek V3.1"
+          "modelID": "DeepSeek-V3.1",
+          "name": "DeepSeek V3.1",
+          "capabilities": { "input": ["text"], "output": ["text"] }
         }
       },
-      "options": {
+      "settings": {
         "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
         "apiKey": "{env:AZURE_API_KEY}",
         "apiMode": "chat",
-        "quota": {
-          "default": {
-            "rpm": 60,
-            "tpm": 100000,
-            "maxConcurrent": 4
-          }
-        }
+        "quota": { "default": { "rpm": 60, "tpm": 100000, "maxConcurrent": 4 } }
       }
     }
   }
 }
 ```
 
-### 17) OpenCode/Kilo JSON: Static quota with per-model overrides
+### 17) OpenCode V2: Per-model quota limits
+
+Per-model quota keys use the Azure model ID passed to the provider.
 
 ```json
 {
-  "provider": {
+  "providers": {
     "azure-foundry": {
-      "name": "Azure Foundry",
-      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "package": "aisdk:file:///usr/local/provider/azure-foundry-provider/index.js",
       "models": {
-        "kimi-k2.5": {
-          "id": "FW-Kimi-K2.5",
-          "name": "Kimi K2.5"
-        },
-        "mistral-large-3": {
-          "id": "Mistral-Large-3",
-          "name": "Mistral Large 3"
-        }
+        "kimi-k2.5": { "modelID": "FW-Kimi-K2.5", "name": "Kimi K2.5" },
+        "mistral-large-3": { "modelID": "Mistral-Large-3", "name": "Mistral Large 3" }
       },
-      "options": {
+      "settings": {
         "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
         "apiKey": "{env:AZURE_API_KEY}",
         "apiMode": "chat",
         "quota": {
-          "default": {
-            "rpm": 30,
-            "tpm": 50000,
-            "maxConcurrent": 2
-          },
+          "default": { "rpm": 30, "tpm": 50000, "maxConcurrent": 2 },
           "models": {
-            "FW-Kimi-K2.5": {
-              "rpm": 10,
-              "tpm": 20000,
-              "maxConcurrent": 1
-            },
-            "Mistral-Large-3": {
-              "rpm": 20,
-              "tpm": 40000,
-              "maxConcurrent": 2
-            }
+            "FW-Kimi-K2.5": { "rpm": 10, "tpm": 20000, "maxConcurrent": 1 },
+            "Mistral-Large-3": { "rpm": 20, "tpm": 40000, "maxConcurrent": 2 }
           }
         }
       }
@@ -1390,23 +1366,18 @@ Global `apiMode` controls the first attempt for models without a per-model overr
 }
 ```
 
-### 18) OpenCode/Kilo JSON: Retry tuning
+### 18) OpenCode V2: Retry and adaptive throttling
 
 ```json
 {
-  "provider": {
+  "providers": {
     "azure-foundry": {
-      "name": "Azure Foundry",
-      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
-      "models": {
-        "deepseek-v3.1": {
-          "id": "DeepSeek-V3.1",
-          "name": "DeepSeek V3.1"
-        }
-      },
-      "options": {
+      "package": "aisdk:file:///usr/local/provider/azure-foundry-provider/index.js",
+      "models": { "deepseek-v3.1": { "modelID": "DeepSeek-V3.1", "name": "DeepSeek V3.1" } },
+      "settings": {
         "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
         "apiKey": "{env:AZURE_API_KEY}",
+        "cooldownScope": "per-model",
         "quota": {
           "retry": {
             "maxAttempts": 5,
@@ -1415,32 +1386,7 @@ Global `apiMode` controls the first attempt for models without a per-model overr
             "jitterRatio": 0.2,
             "honorRetryAfter": true,
             "cooldownOn429Ms": 5000
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-### 19) OpenCode/Kilo JSON: Adaptive throttling tuning
-
-```json
-{
-  "provider": {
-    "azure-foundry": {
-      "name": "Azure Foundry",
-      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
-      "models": {
-        "deepseek-v3.1": {
-          "id": "DeepSeek-V3.1",
-          "name": "DeepSeek V3.1"
-        }
-      },
-      "options": {
-        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
-        "apiKey": "{env:AZURE_API_KEY}",
-        "quota": {
+          },
           "adaptive": {
             "enabled": true,
             "minCooldownMs": 1000,
@@ -1454,99 +1400,25 @@ Global `apiMode` controls the first attempt for models without a per-model overr
 }
 ```
 
-### 20) OpenCode/Kilo JSON: Disable adaptive throttling
+Set `quota.adaptive.enabled` to `false` to disable adaptive throttling.
+
+### 19) OpenCode V2: Assistant reasoning sanitization
 
 ```json
 {
-  "provider": {
+  "providers": {
     "azure-foundry": {
-      "name": "Azure Foundry",
-      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "package": "aisdk:file:///usr/local/provider/azure-foundry-provider/index.js",
       "models": {
-        "deepseek-v3.1": {
-          "id": "DeepSeek-V3.1",
-          "name": "DeepSeek V3.1"
-        }
+        "mistral-large-3": { "modelID": "Mistral-Large-3", "name": "Mistral Large 3" },
+        "deepseek-v3.1": { "modelID": "DeepSeek-V3.1", "name": "DeepSeek V3.1" }
       },
-      "options": {
-        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
-        "apiKey": "{env:AZURE_API_KEY}",
-        "quota": {
-          "adaptive": {
-            "enabled": false
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-### 21) OpenCode/Kilo JSON: Per-model cooldown scope
-
-```json
-{
-  "provider": {
-    "azure-foundry": {
-      "name": "Azure Foundry",
-      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
-      "models": {
-        "kimi-k2.5": {
-          "id": "FW-Kimi-K2.5",
-          "name": "Kimi K2.5"
-        },
-        "mistral-large-3": {
-          "id": "Mistral-Large-3",
-          "name": "Mistral Large 3"
-        }
-      },
-      "options": {
-        "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
-        "apiKey": "{env:AZURE_API_KEY}",
-        "cooldownScope": "per-model",
-        "quota": {
-          "adaptive": {
-            "enabled": true
-          },
-          "retry": {
-            "maxAttempts": 4,
-            "cooldownOn429Ms": 10000
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-### 23) OpenCode/Kilo JSON: Assistant reasoning sanitization
-
-```json
-{
-  "provider": {
-    "azure-foundry": {
-      "name": "Azure Foundry",
-      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
-      "models": {
-        "mistral-large-3": {
-          "id": "Mistral-Large-3",
-          "name": "Mistral Large 3",
-          "modalities": { "input": ["text"], "output": ["text"] }
-        },
-        "deepseek-v3.1": {
-          "id": "DeepSeek-V3.1",
-          "name": "DeepSeek V3.1",
-          "modalities": { "input": ["text"], "output": ["text"] }
-        }
-      },
-      "options": {
+      "settings": {
         "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
         "apiKey": "{env:AZURE_API_KEY}",
         "assistantReasoningSanitization": "auto",
         "modelOptions": {
-          "Mistral-Large-3": {
-            "assistantReasoningSanitization": "always"
-          }
+          "Mistral-Large-3": { "assistantReasoningSanitization": "always" }
         }
       }
     }
@@ -1588,21 +1460,21 @@ const provider = createAzureFoundryProvider({
 })
 ```
 
-### 27) OpenCode/Kilo JSON: Endpoint-only config with implicit Entra auth
+### 20) OpenCode V2: Endpoint-only config with implicit Entra auth
 
 ```json
 {
-  "provider": {
+  "providers": {
     "azure-foundry": {
       "name": "Azure Foundry",
-      "npm": "file:///usr/local/provider/azure-foundry-provider/index.js",
+      "package": "aisdk:file:///usr/local/provider/azure-foundry-provider/index.js",
       "models": {
         "deepseek-v3.1": {
-          "id": "DeepSeek-V3.1",
+          "modelID": "DeepSeek-V3.1",
           "name": "DeepSeek V3.1"
         }
       },
-      "options": {
+      "settings": {
         "endpoint": "https://ais123.services.ai.azure.com/openai/v1",
         "apiMode": "chat"
       }

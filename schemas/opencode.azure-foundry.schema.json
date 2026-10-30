@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.ophios.com/json/opencode.azure-foundry.schema.json",
   "title": "OpenCode config with Azure Foundry provider options",
-  "description": "Composes the upstream OpenCode configuration schema and adds IntelliSense for provider entries loaded from azure-foundry-provider.",
+  "description": "Composes the OpenCode V2 configuration schema and adds IntelliSense for AISDK providers loaded from azure-foundry-provider.",
   "allOf": [
     {
       "$ref": "https://opencode.ai/config.json"
@@ -10,7 +10,7 @@
     {
       "type": "object",
       "properties": {
-        "provider": {
+        "providers": {
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/providerEntryOverlay"
@@ -24,17 +24,17 @@
       "if": {
         "type": "object",
         "properties": {
-          "npm": {
+          "package": {
             "type": "string",
-            "pattern": "(^|[/@._-])azure-foundry-provider([/@._-]|$)"
+            "pattern": "azure-foundry-provider"
           }
         },
-        "required": ["npm"]
+        "required": ["package"]
       },
       "then": {
         "type": "object",
         "properties": {
-          "options": {
+          "settings": {
             "allOf": [
               {
                 "type": "object"

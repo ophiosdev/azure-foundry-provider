@@ -345,8 +345,7 @@ class QuotaGovernor {
   debugWindowState(
     modelId: string,
   ):
-    | { requestsLength: number; tokensLength: number; tokenSum: number; active: number }
-    | undefined {
+    { requestsLength: number; tokensLength: number; tokenSum: number; active: number } | undefined {
     const window = this.windows.get(modelId)
     if (!window) return undefined
     return {

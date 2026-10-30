@@ -160,6 +160,119 @@ describe("createAzureFoundryProvider", () => {
     expect(model.provider).toContain(".responses")
   })
 
+  test("chat omits V2 provider settings from wire body but keeps custom options", async () => {
+    const { calls, fetchFn } = mkFetchSequence([mkChatOkResponse("gpt-5.4")])
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "factory-secret",
+      fetch: fetchFn,
+      name: "azure-foundry",
+    })
+
+    await provider.languageModel("gpt-5.4").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      providerOptions: {
+        "azure-foundry": {
+          endpoint: "https://must-not-appear.example/openai/v1",
+          apiKey: "request-secret",
+          headers: { Authorization: "Bearer request-secret" },
+          apiMode: "responses",
+          toolPolicy: "off",
+          quota: { retry: { maxAttempts: 1 } },
+          cooldownScope: "per-model",
+          assistantReasoningSanitization: "always",
+          modelOptions: { "gpt-5.4": { apiMode: "responses" } },
+          reasoningEffort: "high",
+          customWireOption: "keep-me",
+        },
+      },
+    })
+
+    const request = calls[0]
+    if (!request) throw new Error("missing chat request")
+    const body = (await request.json()) as Record<string, unknown>
+    for (const key of [
+      "endpoint",
+      "apiKey",
+      "headers",
+      "apiMode",
+      "toolPolicy",
+      "quota",
+      "cooldownScope",
+      "assistantReasoningSanitization",
+      "modelOptions",
+    ]) {
+      expect(body).not.toHaveProperty(key)
+    }
+    expect(JSON.stringify(body)).not.toContain("request-secret")
+    expect(body).toMatchObject({ reasoning_effort: "high", customWireOption: "keep-me" })
+  })
+
+  test("Responses consumes V2 options under SDK namespace", async () => {
+    const { calls, fetchFn } = mkFetchSequence([mkResponsesOkResponse("gpt-5.4")])
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/responses",
+      apiKey: "k",
+      fetch: fetchFn,
+      name: "azure-foundry",
+    })
+
+    await provider.languageModel("gpt-5.4").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      providerOptions: {
+        "azure-foundry": {
+          endpoint: "https://must-not-appear.example/openai/v1",
+          apiMode: "chat",
+          reasoningEffort: "high",
+          customOption: "preserved",
+        },
+        azure: {
+          reasoningEffort: "low",
+          store: false,
+        },
+      },
+    })
+
+    const request = calls[0]
+    if (!request) throw new Error("missing Responses request")
+    const body = (await request.json()) as Record<string, unknown>
+    expect(body).toMatchObject({ reasoning: { effort: "low" }, store: false })
+    expect(body).not.toHaveProperty("endpoint")
+    expect(body).not.toHaveProperty("apiMode")
+  })
+
+  test("V2 Responses reasoning options survive operation-mismatch fallback", async () => {
+    const { calls, fetchFn } = mkFetchSequence([
+      mkChatMismatchResponse(),
+      mkResponsesOkResponse("gpt-5.4"),
+    ])
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "k",
+      fetch: fetchFn,
+      name: "azure-foundry",
+      quota: { retry: { maxAttempts: 1 } },
+    })
+
+    await provider.languageModel("gpt-5.4").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      providerOptions: {
+        "azure-foundry": {
+          apiMode: "chat",
+          reasoningEffort: "high",
+          customWireOption: "keep-me",
+        },
+      },
+    })
+
+    expect(calls).toHaveLength(2)
+    const chatBody = (await calls[0]!.json()) as Record<string, unknown>
+    const responsesBody = (await calls[1]!.json()) as Record<string, unknown>
+    expect(chatBody).not.toHaveProperty("apiMode")
+    expect(chatBody).toHaveProperty("customWireOption", "keep-me")
+    expect(responsesBody).toHaveProperty("reasoning.effort", "high")
+  })
+
   test("repeated same-mode construction preserves deterministic provider mode", () => {
     const provider = createAzureFoundryProvider({
       endpoint:

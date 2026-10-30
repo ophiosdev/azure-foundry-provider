@@ -707,7 +707,7 @@ Retry defaults (used unless overridden):
 - `honorRetryAfter: true`
 - `cooldownOn429Ms: 10000`
 
-Retry options are normalized to finite values. `maxAttempts` is clamped to `1..10`; delay and cooldown settings are clamped to at most `300000` ms; `jitterRatio` is clamped to `0..1`. Non-finite values use their documented defaults. A valid server `Retry-After` can extend a wait beyond configured fallback delays.
+Retry options are normalized to finite values. `maxAttempts` is clamped to `1..10`; delay and cooldown settings are clamped to at most `300000` ms; `jitterRatio` is clamped to `0..1`. Non-finite values use their documented defaults. A valid server `Retry-After` can extend a wait beyond configured fallback delays. Long server delays are honored with timer-safe chunks instead of being shortened to the platform timer limit.
 
 Adaptive defaults (used unless overridden):
 

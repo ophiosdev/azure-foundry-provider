@@ -6,9 +6,17 @@
 import { OpenAIResponsesLanguageModel } from "@ai-sdk/openai/internal"
 import { OpenAICompatibleChatLanguageModel } from "@ai-sdk/openai-compatible"
 import { NoSuchModelError } from "@ai-sdk/provider"
+import type { DefaultAzureCredential } from "@azure/identity"
 import { loadApiKey, loadSetting, withUserAgentSuffix } from "@ai-sdk/provider-utils"
 import type { FetchFunction } from "@ai-sdk/provider-utils"
-import { hasAuthHeader, wrapFetch } from "./provider-runtime"
+import {
+  AuthenticationFailure,
+  hasAuthHeader,
+  requestHeaders,
+  requestSignal,
+  waitForSignal,
+  wrapFetch,
+} from "./provider-runtime"
 import {
   type AdaptiveCooldownEvent,
   type AssistantReasoningSanitizationPolicy,
@@ -130,6 +138,14 @@ function isLanguageModelFallbackAllowed(modelMode: ApiMode | undefined): boolean
   return modelMode === undefined
 }
 
+function lazy<T>(create: () => T): () => T {
+  let value: T | undefined
+  return () => {
+    if (value === undefined) value = create()
+    return value
+  }
+}
+
 function getModelProviderId(model: LanguageModel): string {
   const provider = model.provider
   if (typeof provider === "string") return provider
@@ -168,29 +184,60 @@ function hasAsyncAuthSource(options: AzureFoundryOptions): boolean {
 function wrapFetchWithAuth(fetchFn: FetchFunction, options: AzureFoundryOptions): FetchFunction {
   if (!hasAsyncAuthSource(options)) return fetchFn
 
+  let defaultCredentialPromise: Promise<DefaultAzureCredential> | undefined
+  const getDefaultCredential = () => {
+    if (!defaultCredentialPromise) {
+      defaultCredentialPromise = import("@azure/identity").then(
+        ({ DefaultAzureCredential }) => new DefaultAzureCredential(),
+      )
+    }
+
+    const initializing = defaultCredentialPromise
+    return initializing.catch((error: unknown) => {
+      if (defaultCredentialPromise === initializing) defaultCredentialPromise = undefined
+      throw error
+    })
+  }
+
   const wrapped = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const headers = new Headers(init?.headers)
+    const headers = requestHeaders(input, init)
 
     if (headers.has("Authorization") || headers.has("api-key")) {
       return fetchFn(input, init)
     }
 
+    const signal = requestSignal(input, init)
     let token: string
 
-    if (options.bearerTokenProvider) {
-      token = await options.bearerTokenProvider()
-    } else if (options.entraId?.credential) {
-      const scope = options.entraId.scope ?? "https://ai.azure.com/.default"
-      const result = await options.entraId.credential.getToken(scope)
-      token = result.token
-    } else {
-      const scope = options.entraId?.scope ?? "https://ai.azure.com/.default"
-      const identity = await import("@azure/identity")
-      const credential = new identity.DefaultAzureCredential()
-      const result = await credential.getToken(scope)
-      token = result.token
+    try {
+      if (options.bearerTokenProvider) {
+        const pending = Promise.resolve(options.bearerTokenProvider())
+        token = signal ? await waitForSignal(pending, signal) : await pending
+      } else if (options.entraId?.credential) {
+        const scope = options.entraId.scope ?? "https://ai.azure.com/.default"
+        const pending = options.entraId.credential.getToken(
+          scope,
+          signal ? { abortSignal: signal } : undefined,
+        )
+        const result = signal ? await waitForSignal(pending, signal) : await pending
+        token = result.token
+      } else {
+        const scope = options.entraId?.scope ?? "https://ai.azure.com/.default"
+        const credentialPromise = getDefaultCredential()
+        const credential = signal
+          ? await waitForSignal(credentialPromise, signal)
+          : await credentialPromise
+        if (signal?.aborted) throw signal.reason
+        const pending = credential.getToken(scope, signal ? { abortSignal: signal } : undefined)
+        const result = signal ? await waitForSignal(pending, signal) : await pending
+        token = result.token
+      }
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason
+      throw new AuthenticationFailure(error)
     }
 
+    if (signal?.aborted) throw signal.reason
     headers.set("Authorization", `Bearer ${token}`)
     return fetchFn(input, { ...init, headers })
   }
@@ -208,7 +255,9 @@ function resolve(options: AzureFoundryOptions): Resolved {
 
   parseEndpoint(endpoint, getValidationMode(options))
   const toolPolicy = options.toolPolicy ?? "auto"
-  const timeoutFetch = wrapFetch(options.fetch, options.timeout)
+  const baseFetch = options.fetch ?? globalThis.fetch
+  const authenticatedFetch = wrapFetchWithAuth(baseFetch, options)
+  const timeoutFetch = wrapFetch(authenticatedFetch, options.timeout)
   const policy = {
     ...(options.quota ? { quota: options.quota } : {}),
     ...(options.assistantReasoningSanitization
@@ -221,8 +270,7 @@ function resolve(options: AzureFoundryOptions): Resolved {
     ...(options.onSanitizedRetry ? { onSanitizedRetry: options.onSanitizedRetry } : {}),
   }
 
-  let resolvedFetch = wrapFetchWithQuota(timeoutFetch ?? globalThis.fetch, policy)
-  resolvedFetch = wrapFetchWithAuth(resolvedFetch, options)
+  const resolvedFetch = wrapFetchWithQuota(timeoutFetch, policy)
   const name = options.name ?? "azure-foundry"
   const userAgentSuffix = `azure-foundry-provider/${VERSION}`
 
@@ -334,7 +382,9 @@ export function createAzureFoundryProvider(
     if (!isLanguageModelFallbackAllowed(modelMode)) return primaryModel
 
     const fallbackMode = getFallbackTargetMode(primaryMode)
-    const fallbackModel = fallbackMode === "chat" ? createChat(modelId) : createResponses(modelId)
+    const getFallbackModel = lazy(() =>
+      fallbackMode === "chat" ? createChat(modelId) : createResponses(modelId),
+    )
 
     const tryWithFallback = async <T>(
       runPrimary: () => PromiseLike<T>,
@@ -362,13 +412,13 @@ export function createAzureFoundryProvider(
       async doGenerate(options: Parameters<LanguageModel["doGenerate"]>[0]) {
         return tryWithFallback(
           () => primaryModel.doGenerate(options),
-          () => fallbackModel.doGenerate(options),
+          () => getFallbackModel().doGenerate(options),
         )
       },
       async doStream(options: Parameters<LanguageModel["doStream"]>[0]) {
         return tryWithFallback(
           () => primaryModel.doStream(options),
-          () => fallbackModel.doStream(options),
+          () => getFallbackModel().doStream(options),
         )
       },
     }
@@ -392,6 +442,7 @@ export const __test = {
   shouldParseResponseBody,
   isChatOperationMismatchError,
   isLanguageModelFallbackAllowed,
+  lazy,
   getFallbackTargetMode,
   getModelProviderId,
 }

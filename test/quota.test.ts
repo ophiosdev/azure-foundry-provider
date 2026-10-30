@@ -5,6 +5,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { __test, wrapFetchWithQuota } from "../src/quota"
+import { wrapFetch } from "../src/provider-runtime"
 import {
   sanitizeBody,
   sanitizeChatMessages,
@@ -179,6 +180,18 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function withTimeoutGuard<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("test timeout guard")), timeoutMs)
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
 describe("wrapFetchWithQuota", () => {
   test("retries retryable 500 and succeeds", async () => {
     let count = 0
@@ -300,6 +313,31 @@ describe("wrapFetchWithQuota", () => {
     expect(m3["reasoning_content"]).toBeUndefined()
   })
 
+  test("per-model auto sanitization sticks after its first schema rejection", async () => {
+    let count = 0
+    const fetchBase = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      count += 1
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
+      const messages = body["messages"] as Array<Record<string, unknown>>
+      if (messages[0]?.["reasoning_content"] !== undefined) {
+        return mkResponse(400, {
+          error: { message: "extra_forbidden reasoning_content" },
+        })
+      }
+      return mkResponse(200, { ok: true })
+    }
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: { retry: { maxAttempts: 1 } },
+      modelOptions: { m: { assistantReasoningSanitization: "auto" } },
+    })
+    const input = { method: "POST", body: makeBody("m") }
+
+    expect((await wrapped("https://example.com", input)).status).toBe(200)
+    expect(count).toBe(2)
+    expect((await wrapped("https://example.com", input)).status).toBe(200)
+    expect(count).toBe(3)
+  })
+
   test("auto mode does not fallback on unrelated 400", async () => {
     let count = 0
     const fetchBase = async () => {
@@ -338,7 +376,10 @@ describe("wrapFetchWithQuota", () => {
     })
 
     const req = { method: "POST", body: makeBody() }
-    const p1 = wrapped("https://example.com", req)
+    const p1 = wrapped("https://example.com", req).then(async (response) => {
+      await response.text()
+      return response
+    })
     await sleep(5)
     const p2 = wrapped("https://example.com", req)
 
@@ -346,8 +387,39 @@ describe("wrapFetchWithQuota", () => {
     expect(calls.length).toBe(1)
 
     release?.()
-    await Promise.all([p1, p2])
+    const [, response2] = await Promise.all([p1, p2])
+    await response2.body?.cancel()
     expect(calls.length).toBe(2)
+  })
+
+  test("queued abort preserves reason and wakes the next waiter", async () => {
+    const governor = __test.createGovernor({ quota: { default: { maxConcurrent: 1 } } })
+    const releaseFirst = await governor.acquire("m", 1)
+    const firstController = new AbortController()
+    const secondController = new AbortController()
+    const firstPending = governor.acquire("m", 1, firstController.signal)
+    const secondPending = governor.acquire("m", 1, secondController.signal)
+    let releaseSecond: (() => void) | undefined
+
+    try {
+      await Bun.sleep(0)
+      releaseFirst()
+      firstController.abort("first-waiter-stop")
+      await expect(firstPending).rejects.toBe("first-waiter-stop")
+      releaseSecond = await withTimeoutGuard(secondPending, 100)
+      releaseSecond()
+    } finally {
+      secondController.abort("cleanup")
+      releaseSecond?.()
+    }
+  })
+
+  test("already-aborted signal is rejected by no-limit governor admission", async () => {
+    const governor = __test.createGovernor({})
+    const controller = new AbortController()
+    controller.abort("already-stopped")
+
+    await expect(governor.acquire("m", 1, controller.signal)).rejects.toBe("already-stopped")
   })
 
   test("adaptive cooldown can block and abort queued request", async () => {
@@ -495,6 +567,43 @@ describe("wrapFetchWithQuota", () => {
     expect(sentBodies[1]).toBe(raw)
   })
 
+  test("preserves unchanged JSON request bytes including duplicate keys", async () => {
+    const sentBodies: string[] = []
+    const raw = '{\n  "model":"m", "max_tokens": 20, "messages":[], "max_tokens": 21\n}'
+    const fetchBase = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sentBodies.push(String(init?.body ?? ""))
+      return mkResponse(200, { ok: true })
+    }
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: {
+        default: { maxOutputTokensCap: 30 },
+        retry: { maxAttempts: 1 },
+      },
+      assistantReasoningSanitization: "never",
+    })
+
+    await wrapped("https://example.com", { method: "POST", body: raw })
+
+    expect(sentBodies).toEqual([raw])
+  })
+
+  test("preserves top-level JSON array shape with output cap enabled", async () => {
+    const raw = '[{"model":"m","max_tokens":99}]'
+    const fetchBase = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.body).toBe(raw)
+      return mkResponse(200, { ok: true })
+    }
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: {
+        default: { maxOutputTokensCap: 10 },
+        retry: { maxAttempts: 1 },
+      },
+      assistantReasoningSanitization: "never",
+    })
+
+    await wrapped("https://example.com", { method: "POST", body: raw })
+  })
+
   test("retry-after date honors clock delta in parser", () => {
     const target = new Date(10_000).toUTCString()
     expect(__test.parseRetryAfterMs(target, 8_000)).toBe(2_000)
@@ -552,6 +661,171 @@ describe("quota internals", () => {
     )
 
     await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
+  })
+
+  test("sanitization probe accepts exactly 64 KiB and rejects the next byte", async () => {
+    const limit = 64 * 1024
+    const template = { error: { message: "extra_forbidden reasoning_content" }, padding: "" }
+    const overhead = JSON.stringify(template).length
+    const exact = JSON.stringify({ ...template, padding: "x".repeat(limit - overhead) })
+    const oversized = JSON.stringify({ ...template, padding: "x".repeat(limit - overhead + 1) })
+    expect(new TextEncoder().encode(exact).byteLength).toBe(limit)
+
+    const exactResponse = new Response(exact, { status: 400, headers: jsonHeaders() })
+    const wrongLargeLengthResponse = new Response(exact, {
+      status: 400,
+      headers: { "content-type": "application/json", "content-length": "9999999" },
+    })
+    const oversizedResponse = new Response(oversized, { status: 400, headers: jsonHeaders() })
+
+    await expect(shouldRetryWithSanitizedBody(exactResponse)).resolves.toBe(true)
+    await expect(shouldRetryWithSanitizedBody(wrongLargeLengthResponse)).resolves.toBe(true)
+    await expect(shouldRetryWithSanitizedBody(oversizedResponse)).resolves.toBe(false)
+  })
+
+  test("sanitization probe enforces UTF-8 byte limit, not character count", async () => {
+    const body = JSON.stringify({
+      error: { message: "extra_forbidden reasoning_content" },
+      padding: "é".repeat(32_780),
+    })
+    expect(body.length).toBeLessThan(64 * 1024)
+    expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(64 * 1024)
+
+    const response = new Response(body, { status: 400, headers: jsonHeaders() })
+    await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
+  })
+
+  test("sanitization probe handles split UTF-8 characters and leaves original readable", async () => {
+    const raw = JSON.stringify({ error: { message: "café extra_forbidden reasoning_content" } })
+    const bytes = new TextEncoder().encode(raw)
+    const split = bytes.indexOf(0xc3) + 1
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes.slice(0, split))
+          controller.enqueue(bytes.slice(split))
+          controller.close()
+        },
+      }),
+      { status: 400, headers: jsonHeaders() },
+    )
+
+    await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(true)
+    await expect(response.text()).resolves.toBe(raw)
+  })
+
+  test("sanitization probe does not read non-400 response bodies", async () => {
+    const response = new Response("body", { status: 200 })
+    let clones = 0
+    const clone = response.clone.bind(response)
+    Object.defineProperty(response, "clone", {
+      value: () => {
+        clones += 1
+        return clone()
+      },
+    })
+
+    await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
+    expect(clones).toBe(0)
+    await response.body?.cancel()
+  })
+
+  test("sanitization probe bounds oversized stream with missing or wrong length", async () => {
+    const raw = JSON.stringify({
+      error: { message: "extra_forbidden reasoning_content" },
+      padding: "x".repeat(200_000),
+    })
+    const bytes = new TextEncoder().encode(raw)
+    const chunks = Array.from({ length: Math.ceil(bytes.byteLength / 16_384) }, (_, index) =>
+      bytes.slice(index * 16_384, (index + 1) * 16_384),
+    )
+
+    for (const contentLength of [undefined, "1"]) {
+      let pulls = 0
+      let nextChunk = 0
+      const response = new Response(
+        new ReadableStream({
+          pull(controller) {
+            pulls += 1
+            const chunk = chunks[nextChunk++]
+            if (chunk) controller.enqueue(chunk)
+            else controller.close()
+          },
+        }),
+        {
+          status: 400,
+          headers: contentLength
+            ? { "content-type": "application/json", "content-length": contentLength }
+            : jsonHeaders(),
+        },
+      )
+
+      await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
+      expect(pulls).toBeLessThan(chunks.length)
+      await response.body?.cancel()
+    }
+  })
+
+  test("sanitization probe stops on caller abort and bounds stalled streams", async () => {
+    const controller = new AbortController()
+    let slowTimer: ReturnType<typeof setTimeout> | undefined
+    const stalled = () =>
+      new Response(
+        new ReadableStream({
+          pull(streamController) {
+            return new Promise<void>((resolve) => {
+              slowTimer = setTimeout(() => {
+                streamController.close()
+                resolve()
+              }, 2000)
+            })
+          },
+          cancel() {
+            if (slowTimer) clearTimeout(slowTimer)
+          },
+        }),
+        { status: 400, headers: jsonHeaders() },
+      )
+    const abortedResponse = stalled()
+    const pending = shouldRetryWithSanitizedBody(abortedResponse, controller.signal)
+    controller.abort("probe-stop")
+    await expect(withTimeoutGuard(pending, 100)).resolves.toBe(false)
+    void abortedResponse.body?.cancel().catch(() => {})
+
+    const timedResponse = stalled()
+    const started = Date.now()
+    await expect(withTimeoutGuard(shouldRetryWithSanitizedBody(timedResponse), 1300)).resolves.toBe(
+      false,
+    )
+    expect(Date.now() - started).toBeLessThan(1400)
+    void timedResponse.body?.cancel().catch(() => {})
+  })
+
+  test("retry disposal does not await a stalled response cancellation", async () => {
+    let calls = 0
+    const fetchBase = async () => {
+      calls += 1
+      if (calls === 1) {
+        return new Response(
+          new ReadableStream({
+            cancel: () => new Promise<void>(() => {}),
+          }),
+          { status: 500 },
+        )
+      }
+      return mkResponse(200, { ok: true })
+    }
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: {
+        retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+      },
+      assistantReasoningSanitization: "never",
+    })
+
+    await expect(
+      withTimeoutGuard(wrapped("https://example.com", { method: "POST", body: makeBody() }), 100),
+    ).resolves.toMatchObject({ status: 200 })
+    expect(calls).toBe(2)
   })
 
   test("sanitization detector retains existing positive shape", async () => {
@@ -618,7 +892,26 @@ describe("quota internals", () => {
     expect(governor.resolveSanitizationPolicy("b")).toBe("never")
 
     governor.rememberSanitizeAlways("b")
-    expect(governor.resolveSanitizationPolicy("b")).toBe("always")
+    expect(governor.resolveSanitizationPolicy("b")).toBe("never")
+  })
+
+  test("remembered sanitization applies only to effective auto policy", () => {
+    const governor = __test.createGovernor({
+      assistantReasoningSanitization: "never",
+      modelOptions: {
+        auto: { assistantReasoningSanitization: "auto" },
+        never: { assistantReasoningSanitization: "never" },
+      },
+    })
+
+    expect(governor.resolveSanitizationPolicy("auto")).toBe("auto")
+    governor.rememberSanitizeAlways("auto")
+    governor.rememberSanitizeAlways("never")
+    governor.rememberSanitizeAlways("global-never")
+
+    expect(governor.resolveSanitizationPolicy("auto")).toBe("always")
+    expect(governor.resolveSanitizationPolicy("never")).toBe("never")
+    expect(governor.resolveSanitizationPolicy("global-never")).toBe("never")
   })
 
   test("sanitizeChatMessages strips assistant reasoning fields only", () => {
@@ -641,6 +934,31 @@ describe("quota internals", () => {
       { role: "system", content: "rules", reasoning_content: "keep-system" },
       { role: "tool", content: "tool-result", reasoning: { keep: true } },
     ])
+  })
+
+  test("sanitization preserves identity when no assistant reasoning fields exist", () => {
+    const assistant = { role: "assistant", content: "ok" }
+    const user = { role: "user", content: "hi", nested: { keep: true } }
+    const messages = [assistant, user]
+    const body = { model: "m", messages }
+
+    expect(sanitizeChatMessages(messages)).toBe(messages)
+    expect(sanitizeBody(body)).toBe(body)
+  })
+
+  test("sanitization copies only changed assistant messages", () => {
+    const assistant = { role: "assistant", content: "ok", reasoning_content: "hidden" }
+    const unchangedAssistant = { role: "assistant", content: "still ok" }
+    const user = { role: "user", content: "hi", nested: { keep: true } }
+    const messages = [assistant, unchangedAssistant, user]
+    const sanitized = sanitizeChatMessages(messages) as Array<Record<string, unknown>>
+
+    expect(sanitized).not.toBe(messages)
+    expect(sanitized[0]).not.toBe(assistant)
+    expect(sanitized[0]?.["reasoning_content"]).toBeUndefined()
+    expect(sanitized[1]).toBe(unchangedAssistant)
+    expect(sanitized[2]).toBe(user)
+    expect(assistant["reasoning_content"]).toBe("hidden")
   })
 
   test("sanitizeChatMessages preserves non-object entries", () => {
@@ -699,6 +1017,7 @@ describe("quota internals", () => {
           jitterRatio: 0,
         },
       },
+      onRetry: () => controller.abort("retry-stop"),
     })
 
     const pending = wrapped("https://example.com", {
@@ -707,9 +1026,7 @@ describe("quota internals", () => {
       signal: controller.signal,
     })
 
-    controller.abort()
-
-    await expect(pending).rejects.toThrow("aborted")
+    await expect(pending).rejects.toBe("retry-stop")
     expect(attempts).toBe(1)
   })
 
@@ -799,6 +1116,130 @@ describe("quota internals", () => {
     release1()
     release2()
     release3()
+  })
+
+  test("maxConcurrent holds the slot until the response body closes", async () => {
+    let calls = 0
+    const fetchFn = toFetchLike(async () => {
+      calls += 1
+      return new Response(new ReadableStream())
+    })
+    const wrapped = wrapFetchWithQuota(fetchFn, {
+      quota: {
+        default: { maxConcurrent: 1 },
+        retry: { maxAttempts: 1 },
+      },
+    })
+    const init = {
+      method: "POST",
+      body: JSON.stringify({ model: "m", messages: [] }),
+    }
+
+    const first = await wrapped("https://example.com", init)
+    const secondPromise = wrapped("https://example.com", init)
+    await Promise.resolve()
+
+    expect(calls).toBe(1)
+
+    await first.body?.cancel()
+    const second = await secondPromise
+    expect(calls).toBe(2)
+    await second.body?.cancel()
+  })
+
+  test("maxConcurrent releases its slot after response body completion", async () => {
+    let calls = 0
+    const fetchFn = toFetchLike(async () => {
+      calls += 1
+      return new Response("done")
+    })
+    const wrapped = wrapFetchWithQuota(fetchFn, {
+      quota: {
+        default: { maxConcurrent: 1 },
+        retry: { maxAttempts: 1 },
+      },
+    })
+    const init = {
+      method: "POST",
+      body: JSON.stringify({ model: "m", messages: [] }),
+    }
+
+    const first = await wrapped("https://example.com", init)
+    const secondPromise = wrapped("https://example.com", init)
+    await Promise.resolve()
+    expect(calls).toBe(1)
+
+    expect(await first.text()).toBe("done")
+    const second = await secondPromise
+    expect(calls).toBe(2)
+    await second.body?.cancel()
+  })
+
+  test("sanitization probe does not release maxConcurrent before caller consumes body", async () => {
+    let calls = 0
+    const fetchFn = toFetchLike(async () => {
+      calls += 1
+      return mkErrorResponse(400, "unrelated validation failure")
+    })
+    const wrapped = wrapFetchWithQuota(fetchFn, {
+      quota: {
+        default: { maxConcurrent: 1 },
+        retry: { maxAttempts: 1 },
+      },
+      assistantReasoningSanitization: "auto",
+    })
+    const init = { method: "POST", body: makeBody("m") }
+
+    const first = await wrapped("https://example.com", init)
+    const secondPromise = wrapped("https://example.com", init)
+    await Promise.resolve()
+    expect(calls).toBe(1)
+
+    await expect(first.text()).resolves.toContain("unrelated validation failure")
+    const second = await secondPromise
+    expect(calls).toBe(2)
+    await second.body?.cancel()
+  })
+
+  test("quota wait does not consume the next attempt timeout", async () => {
+    const signals: AbortSignal[] = []
+    let calls = 0
+    const fetchFn = toFetchLike(async (_input, init) => {
+      calls += 1
+      if (init?.signal) signals.push(init.signal)
+      if (calls === 1) return new Response(new ReadableStream())
+      return new Response(null)
+    })
+    const timedFetch = wrapFetch(fetchFn, 30)
+    if (!timedFetch) throw new Error("missing fetch wrapper")
+    const wrapped = wrapFetchWithQuota(timedFetch, {
+      quota: {
+        default: { maxConcurrent: 1 },
+        retry: { maxAttempts: 1 },
+      },
+    })
+    const init = {
+      method: "POST",
+      body: JSON.stringify({ model: "m", messages: [] }),
+    }
+
+    await wrapped("https://example.com", init)
+    const secondPromise = wrapped("https://example.com", init)
+    await Bun.sleep(60)
+    let guard: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        secondPromise,
+        new Promise<Response>((_resolve, reject) => {
+          guard = setTimeout(() => reject(new Error("quota wait guard")), 100)
+        }),
+      ])
+    } finally {
+      if (guard) clearTimeout(guard)
+    }
+
+    expect(calls).toBe(2)
+    expect(signals[1]?.aborted).toBe(false)
   })
 
   test("governor cooldown applies even without limits", async () => {
@@ -1141,6 +1582,84 @@ describe("quota internals", () => {
     })
     expect(clamped["max_tokens"]).toBe(10)
     expect(clamped["max_completion_tokens"]).toBe(10)
+
+    const unchanged = { model: "m", max_tokens: 5, messages: [] }
+    expect(governor.clampMaxOutput(unchanged)).toBe(unchanged)
+
+    const original = { model: "m", max_tokens: 99, messages: [{ role: "user" }] }
+    const capped = governor.clampMaxOutput(original)
+    expect(capped).not.toBe(original)
+    expect(capped["messages"]).toBe(original.messages)
+    expect(original["max_tokens"]).toBe(99)
+  })
+
+  test("normalizes non-finite and excessive retry options", () => {
+    const nonFinite = __test
+      .createGovernor({
+        quota: {
+          retry: {
+            maxAttempts: Number.NaN,
+            baseDelayMs: Number.POSITIVE_INFINITY,
+            maxDelayMs: Number.NaN,
+            jitterRatio: Number.POSITIVE_INFINITY,
+            cooldownOn429Ms: Number.NaN,
+          },
+        },
+      })
+      .getRetryOptions()
+
+    expect(nonFinite).toEqual({
+      maxAttempts: 4,
+      baseDelayMs: 1200,
+      maxDelayMs: 30_000,
+      jitterRatio: 0.25,
+      honorRetryAfter: true,
+      cooldownOn429Ms: 10_000,
+    })
+
+    const excessive = __test
+      .createGovernor({
+        quota: {
+          retry: {
+            maxAttempts: 1000,
+            baseDelayMs: 1_000_000_000,
+            maxDelayMs: 1_000_000_000,
+            jitterRatio: 2,
+            cooldownOn429Ms: 1_000_000_000,
+          },
+        },
+      })
+      .getRetryOptions()
+
+    expect(excessive.maxAttempts).toBe(10)
+    expect(excessive.baseDelayMs).toBe(300_000)
+    expect(excessive.maxDelayMs).toBe(300_000)
+    expect(excessive.jitterRatio).toBe(1)
+    expect(excessive.cooldownOn429Ms).toBe(300_000)
+  })
+
+  test("NaN retry count keeps request clamping and bounded retry path", async () => {
+    const bodies: Record<string, unknown>[] = []
+    const fetchBase = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>)
+      return new Response("temporary", { status: 500 })
+    }
+    const wrapped = wrapFetchWithQuota(toFetchLike(fetchBase), {
+      quota: {
+        default: { maxOutputTokensCap: 10 },
+        retry: { maxAttempts: Number.NaN, baseDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+      },
+      assistantReasoningSanitization: "never",
+    })
+
+    const response = await wrapped("https://example.com", {
+      method: "POST",
+      body: JSON.stringify({ model: "m", max_tokens: 99, messages: [] }),
+    })
+
+    expect(response.status).toBe(500)
+    expect(bodies).toHaveLength(4)
+    expect(bodies.every((body) => body["max_tokens"] === 10)).toBe(true)
   })
 
   test("evicts idle windows after ttl sweep", async () => {

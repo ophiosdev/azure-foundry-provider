@@ -153,6 +153,8 @@ const DEFAULT_ADAPTIVE: ResolvedAdaptive = {
 
 const MAX_RETRY_ATTEMPTS = 10
 const MAX_RETRY_DELAY_MS = 300_000
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
+const MAX_TIMER_DELAY_BIGINT = BigInt(MAX_TIMER_DELAY_MS)
 
 function boundedInteger(
   value: number | undefined,
@@ -178,20 +180,45 @@ function waitMs(delay: number, signal?: AbortSignal | null): Promise<void> {
   if (delay <= 0) return Promise.resolve()
 
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const longDelay = delay > MAX_TIMER_DELAY_MS
+    let remaining = longDelay ? BigInt(Math.ceil(delay)) : 0n
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const cleanup = () => {
       signal?.removeEventListener("abort", onAbort)
-      resolve()
-    }, delay)
+    }
+
+    const scheduleNext = () => {
+      const chunk = longDelay
+        ? Number(remaining > MAX_TIMER_DELAY_BIGINT ? MAX_TIMER_DELAY_BIGINT : remaining)
+        : delay
+      timer = setTimeout(() => {
+        if (longDelay) {
+          remaining -= BigInt(chunk)
+          if (remaining > 0n) {
+            scheduleNext()
+            return
+          }
+        }
+        cleanup()
+        resolve()
+      }, chunk)
+    }
 
     const onAbort = () => {
-      clearTimeout(timer)
-      signal?.removeEventListener("abort", onAbort)
+      if (timer !== undefined) clearTimeout(timer)
+      cleanup()
       // Preserve arbitrary caller-supplied AbortSignal reasons.
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       reject(signal?.reason)
     }
 
     signal?.addEventListener("abort", onAbort, { once: true })
+    if (signal?.aborted) {
+      onAbort()
+      return
+    }
+    scheduleNext()
   })
 }
 

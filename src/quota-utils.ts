@@ -122,7 +122,8 @@ function parseRetryAfterMs(value: string | null, nowMs: number = Date.now()): nu
 
   const seconds = Number(value)
   if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.round(seconds * 1000)
+    const milliseconds = seconds * 1000
+    return Number.isFinite(milliseconds) ? Math.round(milliseconds) : undefined
   }
 
   const dateMs = Date.parse(value)

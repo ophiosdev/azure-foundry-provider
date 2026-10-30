@@ -99,23 +99,16 @@ function parseQuery(url: URL) {
   }
 }
 
-function replaceMode(prefix: string, mode: ApiMode): string {
+function replaceMode(prefix: string, mode: ApiMode, v1 = false): string {
   const normalizedPrefix = normalizePath(prefix)
   const base = normalizedPrefix === "/" ? "" : normalizedPrefix
-  if (mode === "chat") return `${base}/chat/completions`
-  return `${base}/responses`
-}
-
-function replaceModeV1(prefix: string, mode: ApiMode): string {
-  const normalizedPrefix = normalizePath(prefix)
-  const base = normalizedPrefix === "/" ? "" : normalizedPrefix
-  if (mode === "chat") return `${base}/openai/v1/chat/completions`
-  return `${base}/openai/v1/responses`
+  const path = mode === "chat" ? "chat/completions" : "responses"
+  return `${base}/${v1 ? "openai/v1/" : ""}${path}`
 }
 
 function resolveOperationPath(info: PathInfo, mode: ApiMode): string {
   if (info.pathType === "v1-base") {
-    return replaceModeV1(info.prefix, mode)
+    return replaceMode(info.prefix, mode, true)
   }
 
   if (mode === inferMode(info.pathType)) {
@@ -123,7 +116,7 @@ function resolveOperationPath(info: PathInfo, mode: ApiMode): string {
   }
 
   if (info.pathType === "v1-chat-completions" || info.pathType === "v1-responses") {
-    return replaceModeV1(info.prefix, mode)
+    return replaceMode(info.prefix, mode, true)
   }
 
   return replaceMode(info.prefix, mode)

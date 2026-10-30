@@ -65,6 +65,92 @@ function mkJsonSanitizeResponse(status: number, body: unknown): Response {
   })
 }
 
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
+
+type ManualTimer = {
+  handle: ReturnType<typeof setTimeout>
+  delay: number
+  callback: () => void
+  active: boolean
+}
+
+function createManualTimerHarness() {
+  const originalSetTimeout = globalThis.setTimeout
+  const originalClearTimeout = globalThis.clearTimeout
+  const originalNow = Date.now
+  const timers: ManualTimer[] = []
+  const byHandle = new Map<ReturnType<typeof setTimeout>, ManualTimer>()
+  let now = originalNow()
+  let nextHandle = 0
+
+  globalThis.setTimeout = ((callback: TimerHandler, delay = 0) => {
+    if (typeof callback !== "function") throw new Error("Manual timers require callback functions")
+    nextHandle += 1
+    const handle = nextHandle as unknown as ReturnType<typeof setTimeout>
+    const timer: ManualTimer = { handle, delay, callback: callback as () => void, active: true }
+    timers.push(timer)
+    byHandle.set(handle, timer)
+    return handle
+  }) as unknown as typeof setTimeout
+
+  globalThis.clearTimeout = ((handle?: ReturnType<typeof setTimeout>) => {
+    if (handle !== undefined) {
+      const timer = byHandle.get(handle)
+      if (timer) timer.active = false
+    }
+  }) as typeof clearTimeout
+  Date.now = () => now
+
+  return {
+    activeDelays: () => timers.filter((timer) => timer.active).map((timer) => timer.delay),
+    fireNext: () => {
+      const timer = timers.find((candidate) => candidate.active)
+      if (!timer) throw new Error("No active timer to fire")
+      timer.active = false
+      now += timer.delay
+      timer.callback()
+    },
+    restore: () => {
+      globalThis.setTimeout = originalSetTimeout
+      globalThis.clearTimeout = originalClearTimeout
+      Date.now = originalNow
+    },
+  }
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 12; index += 1) await Promise.resolve()
+}
+
+function createRetryAfterFetch(retryAfterMs: number, maxConcurrent?: number) {
+  let calls = 0
+  const wrapped = wrapFetchWithQuota(
+    toFetchLike(async () => {
+      calls += 1
+      if (calls === 1) {
+        return mkErrorResponse(429, "rate limit", {
+          "retry-after": String(retryAfterMs / 1000),
+        })
+      }
+      return mkResponse(200, { ok: true })
+    }),
+    {
+      quota: {
+        ...(maxConcurrent === undefined ? {} : { default: { maxConcurrent } }),
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 1,
+          maxDelayMs: 1,
+          jitterRatio: 0,
+          honorRetryAfter: true,
+          cooldownOn429Ms: 1,
+        },
+      },
+    },
+  )
+  return { wrapped, calls: () => calls }
+}
+
 const sanitizationPositiveFixtures: SanitizationFixture[] = [
   {
     name: "detail extra_forbidden on reasoning_content",
@@ -864,6 +950,11 @@ describe("quota internals", () => {
     await expect(shouldRetryWithSanitizedBody(response)).resolves.toBe(false)
   })
 
+  test("retry-after parser rejects seconds whose millisecond conversion overflows", () => {
+    expect(__test.parseRetryAfterMs("2147483.648")).toBe(2_147_483_648)
+    expect(__test.parseRetryAfterMs("1e308")).toBeUndefined()
+  })
+
   test("retry-after parser handles seconds and date", () => {
     expect(__test.parseRetryAfterMs("1")).toBe(1000)
     expect(__test.parseRetryAfterMs("not-a-date")).toBeUndefined()
@@ -871,6 +962,225 @@ describe("quota internals", () => {
     const future = new Date(Date.now() + 2000).toUTCString()
     const ms = __test.parseRetryAfterMs(future)
     expect(ms).toBeGreaterThanOrEqual(0)
+  })
+
+  test("long retry-after uses one timer at the timer ceiling", async () => {
+    const timers = createManualTimerHarness()
+    const listeners = new Set<EventListenerOrEventListenerObject>()
+    let listenerAdds = 0
+    let listenerRemoves = 0
+    const signal = {
+      aborted: false,
+      reason: undefined,
+      addEventListener: (_type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (!listener) return
+        listenerAdds += 1
+        listeners.add(listener)
+      },
+      removeEventListener: (_type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (!listener) return
+        listenerRemoves += 1
+        listeners.delete(listener)
+      },
+    } as unknown as AbortSignal
+    const { wrapped, calls } = createRetryAfterFetch(MAX_TIMER_DELAY_MS)
+    const pending = wrapped("https://example.com", {
+      method: "POST",
+      body: makeBody(),
+      signal,
+    })
+
+    try {
+      await flushMicrotasks()
+      expect(calls()).toBe(1)
+      expect(timers.activeDelays()).toEqual([MAX_TIMER_DELAY_MS])
+
+      timers.fireNext()
+      const response = await pending
+
+      expect(response.status).toBe(200)
+      expect(calls()).toBe(2)
+      expect(timers.activeDelays()).toEqual([])
+      expect(listenerAdds).toBe(1)
+      expect(listenerRemoves).toBe(1)
+      expect(listeners.size).toBe(0)
+    } finally {
+      await pending.catch(() => {})
+      timers.restore()
+    }
+  })
+
+  test("overflowed retry-after falls back without scheduling a non-finite timer", async () => {
+    const timers = createManualTimerHarness()
+    const controller = new AbortController()
+    let calls = 0
+    const wrapped = wrapFetchWithQuota(
+      toFetchLike(async () => {
+        calls += 1
+        if (calls === 1) {
+          return mkErrorResponse(429, "rate limit", { "retry-after": "1e308" })
+        }
+        return mkResponse(200, { ok: true })
+      }),
+      {
+        quota: {
+          retry: {
+            maxAttempts: 2,
+            baseDelayMs: 1,
+            maxDelayMs: 1,
+            jitterRatio: 0,
+            honorRetryAfter: true,
+            cooldownOn429Ms: 1,
+          },
+        },
+      },
+    )
+    const pending = wrapped("https://example.com", {
+      method: "POST",
+      body: makeBody(),
+      signal: controller.signal,
+    })
+
+    try {
+      await flushMicrotasks()
+      expect(calls).toBe(1)
+      expect(timers.activeDelays()).toEqual([1])
+
+      timers.fireNext()
+      const response = await pending
+
+      expect(response.status).toBe(200)
+      expect(calls).toBe(2)
+      expect(timers.activeDelays()).toEqual([])
+    } finally {
+      controller.abort("test-cleanup")
+      await pending.catch(() => {})
+      timers.restore()
+    }
+  })
+
+  test("long retry-after above the timer ceiling waits for the final chunk", async () => {
+    const timers = createManualTimerHarness()
+    const controller = new AbortController()
+    const { wrapped, calls } = createRetryAfterFetch(MAX_TIMER_DELAY_MS + 1)
+    const pending = wrapped("https://example.com", {
+      method: "POST",
+      body: makeBody(),
+      signal: controller.signal,
+    })
+
+    try {
+      await flushMicrotasks()
+      expect(timers.activeDelays()).toEqual([MAX_TIMER_DELAY_MS])
+
+      timers.fireNext()
+      await flushMicrotasks()
+      expect(calls()).toBe(1)
+      expect(timers.activeDelays()).toEqual([1])
+
+      timers.fireNext()
+      const response = await pending
+
+      expect(response.status).toBe(200)
+      expect(calls()).toBe(2)
+      expect(timers.activeDelays()).toEqual([])
+    } finally {
+      controller.abort("test-cleanup")
+      await pending.catch(() => {})
+      timers.restore()
+    }
+  })
+
+  test("long retry-after with maxConcurrent waits through every bounded chunk", async () => {
+    const timers = createManualTimerHarness()
+    const controller = new AbortController()
+    const totalDelay = MAX_TIMER_DELAY_MS * 2 + 17
+    const { wrapped, calls } = createRetryAfterFetch(totalDelay, 1)
+    const pending = wrapped("https://example.com", {
+      method: "POST",
+      body: makeBody(),
+      signal: controller.signal,
+    })
+
+    try {
+      await flushMicrotasks()
+      expect(calls()).toBe(1)
+      expect(timers.activeDelays()).toEqual([MAX_TIMER_DELAY_MS])
+
+      timers.fireNext()
+      await flushMicrotasks()
+      expect(calls()).toBe(1)
+      expect(timers.activeDelays()).toEqual([MAX_TIMER_DELAY_MS])
+
+      timers.fireNext()
+      await flushMicrotasks()
+      expect(calls()).toBe(1)
+      expect(timers.activeDelays()).toEqual([17])
+
+      timers.fireNext()
+      const response = await pending
+
+      expect(response.status).toBe(200)
+      expect(calls()).toBe(2)
+      expect(timers.activeDelays()).toEqual([])
+    } finally {
+      controller.abort("test-cleanup")
+      await pending.catch(() => {})
+      timers.restore()
+    }
+  })
+
+  test("aborting after a long-wait chunk clears the active timer and preserves reason", async () => {
+    const timers = createManualTimerHarness()
+    const controller = new AbortController()
+    const reason = { cause: "caller-stop" }
+    const { wrapped, calls } = createRetryAfterFetch(MAX_TIMER_DELAY_MS * 2 + 1)
+    const pending = wrapped("https://example.com", {
+      method: "POST",
+      body: makeBody(),
+      signal: controller.signal,
+    })
+
+    try {
+      await flushMicrotasks()
+      expect(timers.activeDelays()).toEqual([MAX_TIMER_DELAY_MS])
+
+      timers.fireNext()
+      await flushMicrotasks()
+      expect(timers.activeDelays()).toEqual([MAX_TIMER_DELAY_MS])
+
+      controller.abort(reason)
+      await expect(pending).rejects.toBe(reason)
+
+      expect(calls()).toBe(1)
+      expect(timers.activeDelays()).toEqual([])
+    } finally {
+      controller.abort("test-cleanup")
+      await pending.catch(() => {})
+      timers.restore()
+    }
+  })
+
+  test("already-aborted retry request starts no timer and preserves reason", async () => {
+    const timers = createManualTimerHarness()
+    const controller = new AbortController()
+    const reason = "already-stopped"
+    controller.abort(reason)
+    const { wrapped, calls } = createRetryAfterFetch(MAX_TIMER_DELAY_MS + 1)
+
+    try {
+      await expect(
+        wrapped("https://example.com", {
+          method: "POST",
+          body: makeBody(),
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason)
+      expect(calls()).toBe(0)
+      expect(timers.activeDelays()).toEqual([])
+    } finally {
+      timers.restore()
+    }
   })
 
   test("retry-after parser supports injected nowMs", () => {

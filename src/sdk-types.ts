@@ -8,11 +8,15 @@ import type {
   ImageModelV2,
   LanguageModelV3,
   LanguageModelV3CallOptions,
-  LanguageModelV3Middleware,
+  LanguageModelV4,
+  LanguageModelV4CallOptions,
+  LanguageModelV4Middleware,
 } from "@ai-sdk/provider"
 
 export type ProviderLanguageModel = LanguageModelV3
+export type ProviderTransportLanguageModel = LanguageModelV4
+export type ProviderTransportCallOptions = LanguageModelV4CallOptions
+export type ProviderTransportMiddleware = LanguageModelV4Middleware
 export type ProviderLanguageModelCallOptions = LanguageModelV3CallOptions
-export type ProviderLanguageModelMiddleware = LanguageModelV3Middleware
 export type ProviderEmbeddingModel = EmbeddingModelV2<string>
 export type ProviderImageModel = ImageModelV2

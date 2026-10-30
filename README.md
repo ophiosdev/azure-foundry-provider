@@ -87,6 +87,8 @@ const model = provider.languageModel("DeepSeek-V3.1")
 
 ## OpenCode V2 integration
 
+The OpenAI SDK V4 transports are adapted to the V3 model contract consumed by OpenCode V2. Provider options, tool/file inputs, common stream parts, and generated sources are translated at this boundary. V4-only `reasoning-file` and custom output parts fail explicitly; citation ranges and `structuredOutputText` have no V3 representation.
+
 ```json
 {
   "providers": {

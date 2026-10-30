@@ -5,9 +5,9 @@
 
 import { wrapLanguageModel } from "ai"
 import type {
-  ProviderLanguageModel,
-  ProviderLanguageModelCallOptions,
-  ProviderLanguageModelMiddleware,
+  ProviderTransportCallOptions,
+  ProviderTransportLanguageModel,
+  ProviderTransportMiddleware,
 } from "./sdk-types"
 import type { ApiMode } from "./url"
 
@@ -46,9 +46,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function dropParallelToolCalls(
-  providerOptions: ProviderLanguageModelCallOptions["providerOptions"],
+  providerOptions: ProviderTransportCallOptions["providerOptions"],
   policy: PolicyOptions,
-): ProviderLanguageModelCallOptions["providerOptions"] {
+): ProviderTransportCallOptions["providerOptions"] {
   if (!providerOptions) return undefined
 
   const normalizedName = policy.providerName?.toLowerCase()
@@ -70,15 +70,13 @@ function dropParallelToolCalls(
     else delete next[key]
   }
 
-  return (
-    (next as ProviderLanguageModelCallOptions["providerOptions"] | undefined) ?? providerOptions
-  )
+  return (next as ProviderTransportCallOptions["providerOptions"] | undefined) ?? providerOptions
 }
 
 function stripTools(
-  options: ProviderLanguageModelCallOptions,
+  options: ProviderTransportCallOptions,
   policy: PolicyOptions,
-): ProviderLanguageModelCallOptions {
+): ProviderTransportCallOptions {
   const providerOptions = dropParallelToolCalls(options.providerOptions, policy)
   const { providerOptions: _providerOptions, ...rest } = options
 
@@ -91,9 +89,9 @@ function stripTools(
 }
 
 function normalizeProviderOptions(
-  providerOptions: ProviderLanguageModelCallOptions["providerOptions"],
+  providerOptions: ProviderTransportCallOptions["providerOptions"],
   policy: PolicyOptions,
-): ProviderLanguageModelCallOptions["providerOptions"] {
+): ProviderTransportCallOptions["providerOptions"] {
   const providerName = policy.providerName
   if (!providerOptions || !providerName) return providerOptions
 
@@ -131,7 +129,7 @@ function normalizeProviderOptions(
   return next
 }
 
-function enforceTools(options: ProviderLanguageModelCallOptions): ProviderLanguageModelCallOptions {
+function enforceTools(options: ProviderTransportCallOptions): ProviderTransportCallOptions {
   if (!options.tools || options.tools.length === 0) return options
   if (options.toolChoice?.type === "required") return options
   if (options.toolChoice?.type === "tool") return options
@@ -143,9 +141,9 @@ function enforceTools(options: ProviderLanguageModelCallOptions): ProviderLangua
 }
 
 function transform(
-  options: ProviderLanguageModelCallOptions,
+  options: ProviderTransportCallOptions,
   policy: PolicyOptions,
-): ProviderLanguageModelCallOptions {
+): ProviderTransportCallOptions {
   const providerOptions = normalizeProviderOptions(options.providerOptions, policy)
   const normalized =
     providerOptions === options.providerOptions || providerOptions === undefined
@@ -163,15 +161,15 @@ function transform(
   return normalized
 }
 
-export function applyRequestPolicy<MODEL extends ProviderLanguageModel>(
+export function applyRequestPolicy<MODEL extends ProviderTransportLanguageModel>(
   model: MODEL,
   policy: PolicyOptions,
 ): MODEL {
   if (policy.mode !== "chat" && policy.toolPolicy === "auto" && !policy.providerName) return model
 
-  const middleware: ProviderLanguageModelMiddleware = {
-    specificationVersion: "v3",
-    async transformParams({ params }: { params: ProviderLanguageModelCallOptions }) {
+  const middleware: ProviderTransportMiddleware = {
+    specificationVersion: "v4",
+    async transformParams({ params }: { params: ProviderTransportCallOptions }) {
       return Promise.resolve(transform(params, policy))
     },
   }

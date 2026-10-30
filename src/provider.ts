@@ -9,6 +9,7 @@ import { NoSuchModelError } from "@ai-sdk/provider"
 import { loadApiKey, loadSetting, withUserAgentSuffix } from "@ai-sdk/provider-utils"
 import type { FetchFunction } from "@ai-sdk/provider-utils"
 import { hasAuthHeader, wrapFetch } from "./provider-runtime"
+import { adaptLanguageModelV4ToV3 } from "./sdk-compat"
 import {
   type AdaptiveCooldownEvent,
   type AssistantReasoningSanitizationPolicy,
@@ -315,11 +316,13 @@ export function createAzureFoundryProvider(
     }
     const model = new OpenAICompatibleChatLanguageModel(modelId, chatConfig)
 
-    return applyRequestPolicy(model, {
-      mode: "chat",
-      toolPolicy: cfg.toolPolicy,
-      providerName: cfg.name,
-    })
+    return adaptLanguageModelV4ToV3(
+      applyRequestPolicy(model, {
+        mode: "chat",
+        toolPolicy: cfg.toolPolicy,
+        providerName: cfg.name,
+      }),
+    )
   }
 
   const createResponses = (modelId: string): LanguageModel => {
@@ -334,11 +337,13 @@ export function createAzureFoundryProvider(
     }
     const model = new OpenAIResponsesLanguageModel(modelId, responsesConfig)
 
-    return applyRequestPolicy(model, {
-      mode: "responses",
-      toolPolicy: cfg.toolPolicy,
-      providerName: cfg.name,
-    })
+    return adaptLanguageModelV4ToV3(
+      applyRequestPolicy(model, {
+        mode: "responses",
+        toolPolicy: cfg.toolPolicy,
+        providerName: cfg.name,
+      }),
+    )
   }
 
   const createLanguageModel = (modelId: string): LanguageModel => {

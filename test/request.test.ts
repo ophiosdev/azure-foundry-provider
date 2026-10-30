@@ -5,9 +5,9 @@
 
 import { describe, expect, test } from "bun:test"
 import type {
-  LanguageModelV3,
-  LanguageModelV3CallOptions,
-  LanguageModelV3StreamPart,
+  LanguageModelV4,
+  LanguageModelV4CallOptions,
+  LanguageModelV4StreamPart,
 } from "@ai-sdk/provider"
 import { applyRequestPolicy } from "../src/request"
 
@@ -19,14 +19,14 @@ function usage() {
 }
 
 function mockModel() {
-  const calls: LanguageModelV3CallOptions[] = []
+  const calls: LanguageModelV4CallOptions[] = []
 
-  const model: LanguageModelV3 = {
-    specificationVersion: "v3",
+  const model: LanguageModelV4 = {
+    specificationVersion: "v4",
     provider: "test",
     modelId: "m",
     supportedUrls: {},
-    async doGenerate(options: LanguageModelV3CallOptions) {
+    async doGenerate(options: LanguageModelV4CallOptions) {
       calls.push(options)
       return {
         content: [{ type: "text", text: "ok" }],
@@ -35,9 +35,9 @@ function mockModel() {
         warnings: [],
       }
     },
-    async doStream(options: LanguageModelV3CallOptions) {
+    async doStream(options: LanguageModelV4CallOptions) {
       calls.push(options)
-      const stream = new ReadableStream<LanguageModelV3StreamPart>({
+      const stream = new ReadableStream<LanguageModelV4StreamPart>({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] })
           controller.enqueue({ type: "text-start", id: "text-1" })
@@ -60,10 +60,10 @@ function mockModel() {
 }
 
 describe("applyRequestPolicy", () => {
-  test("wrapped model stays v3", () => {
+  test("wrapped transport stays v4", () => {
     const { model } = mockModel()
     const wrapped = applyRequestPolicy(model, { mode: "chat", toolPolicy: "auto" })
-    expect(wrapped.specificationVersion).toBe("v3")
+    expect(wrapped.specificationVersion).toBe("v4")
   })
 
   test("chat mode keeps maxOutputTokens unchanged", async () => {

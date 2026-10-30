@@ -52,17 +52,11 @@ function shouldRetryWithSanitizedBody(response: Response): Promise<boolean> {
     .clone()
     .json()
     .then((json) => {
-      if (typeof json === "string") {
-        if (json.length > MAX_SANITIZE_ERROR_SCAN_CHARS) return false
-        const text = json.toLowerCase()
-        return hasReasoningSignal(text) && hasSchemaLikeSignal(text)
-      }
-
-      const text = JSON.stringify(json)
+      const text = typeof json === "string" ? json : JSON.stringify(json)
       if (text.length > MAX_SANITIZE_ERROR_SCAN_CHARS) return false
 
-      const lower = text.toLowerCase()
-      return hasReasoningSignal(lower) && hasSchemaLikeSignal(lower)
+      const normalized = text.toLowerCase()
+      return hasReasoningSignal(normalized) && hasSchemaLikeSignal(normalized)
     })
     .catch(() => false)
 }

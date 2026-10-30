@@ -3,11 +3,6 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-type TokenEvent = {
-  at: number
-  tokens: number
-}
-
 function clampPositive(value: number | undefined): number | undefined {
   if (value === undefined) return undefined
   if (!Number.isFinite(value)) return undefined
@@ -113,28 +108,6 @@ function isRetryableStatus(status: number): boolean {
   )
 }
 
-function getTpmWaitMs(
-  windowMs: number,
-  tokens: TokenEvent[],
-  now: number,
-  tpm: number,
-  estimatedTokens: number,
-): number {
-  let used = 0
-  for (const event of tokens) used += event.tokens
-  if (used + estimatedTokens <= tpm) return 0
-
-  let toRelease = used + estimatedTokens - tpm
-  for (const event of tokens) {
-    toRelease -= event.tokens
-    if (toRelease <= 0) {
-      return Math.max(1, windowMs - (now - event.at))
-    }
-  }
-
-  return windowMs
-}
-
 function getRpmWaitMs(windowMs: number, requests: number[], now: number, rpm: number): number {
   if (requests.length < rpm) return 0
   const idx = requests.length - rpm
@@ -149,7 +122,6 @@ export {
   estimatePromptTokens,
   estimateRequestedTokens,
   getRpmWaitMs,
-  getTpmWaitMs,
   isRetryableStatus,
   jitterDelay,
   parseHeaderInt,

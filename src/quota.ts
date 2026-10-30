@@ -323,10 +323,6 @@ class QuotaGovernor {
     return window.requestHead === 0 ? window.requests : window.requests.slice(window.requestHead)
   }
 
-  private activeTokens(window: WindowState): TokenEvent[] {
-    return window.tokenHead === 0 ? window.tokens : window.tokens.slice(window.tokenHead)
-  }
-
   private tokenWaitMs(window: WindowState, now: number, limit: number, pending: number): number {
     if (pending > limit) return 0
     if (window.tokenSum + pending <= limit) return 0
@@ -501,6 +497,24 @@ class QuotaGovernor {
     }
   }
 
+  private emitAdaptiveCooldown(
+    cooldownMs: number,
+    modelId: string | undefined,
+    reason: string,
+    remainingRequests?: number,
+    remainingTokens?: number,
+  ): void {
+    this.setCooldown(cooldownMs, modelId)
+    this.options?.onAdaptiveCooldown?.({
+      eventVersion: "v1",
+      phase: "adaptive_cooldown",
+      cooldownMs,
+      reason,
+      ...(remainingRequests !== undefined ? { remainingRequests } : {}),
+      ...(remainingTokens !== undefined ? { remainingTokens } : {}),
+    })
+  }
+
   applyRateLimitHeaders(response: Response, modelId?: string): void {
     const adaptive = this.getAdaptiveOptions()
     if (!adaptive.enabled) return
@@ -522,43 +536,37 @@ class QuotaGovernor {
 
     if (remainingRequests !== undefined && remainingRequests <= 0) {
       const cooldownMs = Math.max(adaptive.minCooldownMs, this.runtime.windowMs)
-      this.setCooldown(cooldownMs, modelId)
-      this.options?.onAdaptiveCooldown?.({
-        eventVersion: "v1",
-        phase: "adaptive_cooldown",
+      this.emitAdaptiveCooldown(
         cooldownMs,
-        reason: "requests_depleted",
+        modelId,
+        "requests_depleted",
         remainingRequests,
-        ...(remainingTokens !== undefined ? { remainingTokens } : {}),
-      })
+        remainingTokens,
+      )
       return
     }
 
     if (remainingTokens !== undefined && remainingTokens <= 0) {
       const cooldownMs = Math.max(adaptive.minCooldownMs, this.runtime.windowMs)
-      this.setCooldown(cooldownMs, modelId)
-      this.options?.onAdaptiveCooldown?.({
-        eventVersion: "v1",
-        phase: "adaptive_cooldown",
+      this.emitAdaptiveCooldown(
         cooldownMs,
-        reason: "tokens_depleted",
-        ...(remainingRequests !== undefined ? { remainingRequests } : {}),
+        modelId,
+        "tokens_depleted",
+        remainingRequests,
         remainingTokens,
-      })
+      )
       return
     }
 
     if (nearRequestFloor || nearTokenFloor) {
       const cooldownMs = Math.max(adaptive.minCooldownMs, adaptive.lowCooldownMs)
-      this.setCooldown(cooldownMs, modelId)
-      this.options?.onAdaptiveCooldown?.({
-        eventVersion: "v1",
-        phase: "adaptive_cooldown",
+      this.emitAdaptiveCooldown(
         cooldownMs,
-        reason: "low_watermark",
-        ...(remainingRequests !== undefined ? { remainingRequests } : {}),
-        ...(remainingTokens !== undefined ? { remainingTokens } : {}),
-      })
+        modelId,
+        "low_watermark",
+        remainingRequests,
+        remainingTokens,
+      )
       return
     }
   }
@@ -596,12 +604,10 @@ class QuotaGovernor {
 
     const next = { ...body }
 
-    if (typeof next["max_tokens"] === "number" && next["max_tokens"] > cap) {
-      next["max_tokens"] = cap
-    }
-
-    if (typeof next["max_completion_tokens"] === "number" && next["max_completion_tokens"] > cap) {
-      next["max_completion_tokens"] = cap
+    for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"] as const) {
+      if (typeof next[key] === "number" && next[key] > cap) {
+        next[key] = cap
+      }
     }
 
     return next

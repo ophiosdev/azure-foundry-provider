@@ -10,11 +10,31 @@ import { isChatOperationMismatchError } from "../src/provider-errors"
 let defaultCredentialToken = "default-entra-token"
 let defaultCredentialError: Error | undefined
 let defaultCredentialCalls: Array<string | string[]> = []
+let defaultCredentialConstructions = 0
+let defaultCredentialConstructionError: Error | undefined
+let transientDefaultCredentialError: Error | undefined
+let deferDefaultCredentialTokens = false
+let defaultCredentialTokenResolvers: Array<(value: { token: string }) => void> = []
 
 mock.module("@azure/identity", () => ({
   DefaultAzureCredential: class DefaultAzureCredential {
+    constructor() {
+      defaultCredentialConstructions += 1
+      if (defaultCredentialConstructionError) throw defaultCredentialConstructionError
+    }
+
     async getToken(scopes: string | string[]) {
       defaultCredentialCalls.push(scopes)
+      if (deferDefaultCredentialTokens) {
+        return new Promise<{ token: string }>((resolve) => {
+          defaultCredentialTokenResolvers.push(resolve)
+        })
+      }
+      if (transientDefaultCredentialError) {
+        const error = transientDefaultCredentialError
+        transientDefaultCredentialError = undefined
+        throw error
+      }
       if (defaultCredentialError) throw defaultCredentialError
       return {
         token: defaultCredentialToken,
@@ -98,6 +118,11 @@ describe("createAzureFoundryProvider", () => {
     defaultCredentialToken = "default-entra-token"
     defaultCredentialError = undefined
     defaultCredentialCalls = []
+    defaultCredentialConstructions = 0
+    defaultCredentialConstructionError = undefined
+    transientDefaultCredentialError = undefined
+    deferDefaultCredentialTokens = false
+    defaultCredentialTokenResolvers = []
   })
 
   test("mismatch detector does not false trigger on oversized responseBody without chat context", () => {
@@ -1315,6 +1340,33 @@ describe("createAzureFoundryProvider", () => {
     expect(calls[1]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
   })
 
+  test("one language model wrapper reuses fallback behavior for generate and stream", async () => {
+    const { calls, fetchFn } = mkFetchSequence([
+      mkChatMismatchResponse(),
+      mkResponsesOkResponse("gpt-4.1"),
+      mkChatMismatchResponse(),
+      mkResponsesOkResponse("gpt-4.1"),
+    ])
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/chat/completions",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: { retry: { maxAttempts: 1 } },
+    })
+    const model = provider.languageModel("gpt-4.1")
+    const prompt = [{ role: "user" as const, content: [{ type: "text" as const, text: "hello" }] }]
+
+    await model.doGenerate({ prompt })
+    await model.doStream({ prompt })
+
+    expect(calls.map((request) => request.url)).toEqual([
+      "https://foo.openai.azure.com/openai/v1/chat/completions",
+      "https://foo.openai.azure.com/openai/v1/responses",
+      "https://foo.openai.azure.com/openai/v1/chat/completions",
+      "https://foo.openai.azure.com/openai/v1/responses",
+    ])
+  })
+
   test("onFallback fires with expected payload on doGenerate fallback", async () => {
     const events: unknown[] = []
     let count = 0
@@ -1525,6 +1577,17 @@ describe("createAzureFoundryProvider", () => {
     expect(__test.getModelProviderId(model as never)).toBe("object-provider")
   })
 
+  test("lazy fallback factory creates once on first use", () => {
+    let constructions = 0
+    const getFallback = __test.lazy(() => ({ construction: ++constructions }))
+
+    expect(constructions).toBe(0)
+    const first = getFallback()
+    expect(constructions).toBe(1)
+    expect(getFallback()).toBe(first)
+    expect(constructions).toBe(1)
+  })
+
   test("timeout false path does not force timeout behavior", async () => {
     const calls: Array<Request> = []
     const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1607,6 +1670,97 @@ describe("createAzureFoundryProvider", () => {
     })
 
     expect(calls.length).toBe(1)
+  })
+
+  test("numeric timeout covers bearer token acquisition", async () => {
+    let calls = 0
+    let resolveToken: ((token: string) => void) | undefined
+    const fetchFn = Object.assign(
+      async () => {
+        calls += 1
+        return mkChatOkResponse("gpt-4.1")
+      },
+      { preconnect: fetch.preconnect },
+    ) as typeof fetch
+    const provider = createAzureFoundryProvider({
+      endpoint:
+        "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+      bearerTokenProvider: () =>
+        new Promise<string>((resolve) => {
+          resolveToken = resolve
+        }),
+      fetch: fetchFn,
+      timeout: 30,
+      quota: { retry: { maxAttempts: 1 } },
+    })
+    const request = provider.languageModel("gpt-4.1").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    })
+
+    let guard: ReturnType<typeof setTimeout> | undefined
+    try {
+      await expect(
+        Promise.race([
+          request,
+          new Promise<never>((_resolve, reject) => {
+            guard = setTimeout(() => reject(new Error("timeout guard")), 100)
+          }),
+        ]),
+      ).rejects.toMatchObject({ name: "TimeoutError" })
+    } finally {
+      if (guard) clearTimeout(guard)
+    }
+
+    resolveToken?.("late-token")
+    await Promise.resolve()
+    expect(calls).toBe(0)
+  })
+
+  test("attempt timeout errors a response stream without retrying", async () => {
+    let calls = 0
+    const fetchFn = Object.assign(
+      async () => {
+        calls += 1
+        return new Response(
+          new ReadableStream({
+            pull: () => new Promise<void>(() => {}),
+          }),
+        )
+      },
+      { preconnect: fetch.preconnect },
+    ) as typeof fetch
+    const provider = createAzureFoundryProvider({
+      endpoint:
+        "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+      apiKey: "k",
+      fetch: fetchFn,
+      timeout: 30,
+      quota: {
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 1,
+          maxDelayMs: 1,
+          jitterRatio: 0,
+        },
+      },
+    })
+
+    let guard: ReturnType<typeof setTimeout> | undefined
+    try {
+      await expect(
+        Promise.race([
+          provider.languageModel("gpt-4.1").doGenerate({
+            prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+          }),
+          new Promise<never>((_resolve, reject) => {
+            guard = setTimeout(() => reject(new Error("timeout guard")), 100)
+          }),
+        ]),
+      ).rejects.toMatchObject({ name: "TimeoutError" })
+    } finally {
+      if (guard) clearTimeout(guard)
+    }
+    expect(calls).toBe(1)
   })
 
   test("invalid endpoint throws during language model creation", () => {
@@ -1714,6 +1868,41 @@ describe("createAzureFoundryProvider", () => {
     const body2 = await calls[1]!.clone().json()
     expect(body1.max_tokens).toBe(256)
     expect(body2.max_tokens).toBe(256)
+  })
+
+  test("quota clamps max_output_tokens for Responses", async () => {
+    const calls: Array<Request> = []
+    const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(new Request(input, init))
+      return mkResponsesOkResponse()
+    }
+    const fetchFn = Object.assign(fetchBase, {
+      preconnect: fetch.preconnect,
+    }) as typeof fetch
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/responses",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        default: {
+          maxOutputTokensCap: 256,
+        },
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    await provider.responses("gpt-5.3-codex").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      maxOutputTokens: 4096,
+    })
+
+    const req = calls[0]
+    if (!req) throw new Error("missing request")
+    const body = await req.clone().json()
+    expect(body.max_output_tokens).toBe(256)
   })
 
   test("model option can force assistant reasoning sanitization", async () => {
@@ -2179,6 +2368,7 @@ describe("createAzureFoundryProvider", () => {
       })
 
       expect(credentialCalled).toBe(false)
+      expect(defaultCredentialConstructions).toBe(0)
     })
 
     test("Entra credential failure is surfaced clearly", async () => {
@@ -2257,6 +2447,145 @@ describe("createAzureFoundryProvider", () => {
   })
 
   describe("implicit Entra fallback", () => {
+    test("reuses one lazy credential for concurrent requests within a provider", async () => {
+      const calls: Array<Request> = []
+      const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init))
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {},
+        fetch: fetchFn,
+      })
+      const model = provider.languageModel("gpt-4.1")
+      const prompt = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }]
+
+      await Promise.all([model.doGenerate({ prompt }), model.doGenerate({ prompt })])
+
+      expect(defaultCredentialConstructions).toBe(1)
+      expect(defaultCredentialCalls).toHaveLength(2)
+      expect(calls).toHaveLength(2)
+    })
+
+    test("keeps default credentials isolated between providers", async () => {
+      const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+      const options = {
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {},
+        fetch: fetchFn,
+      }
+
+      await createAzureFoundryProvider(options)
+        .languageModel("gpt-4.1")
+        .doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "one" }] }],
+        })
+      await createAzureFoundryProvider(options)
+        .languageModel("gpt-4.1")
+        .doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "two" }] }],
+        })
+
+      expect(defaultCredentialConstructions).toBe(2)
+    })
+
+    test("retries credential construction after initialization failure", async () => {
+      const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {},
+        fetch: fetchFn,
+        quota: { retry: { maxAttempts: 1 } },
+      })
+      const model = provider.languageModel("gpt-4.1")
+
+      defaultCredentialConstructionError = new Error("constructor failed")
+      await expect(
+        model.doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "one" }] }],
+        }),
+      ).rejects.toThrow("constructor failed")
+
+      defaultCredentialConstructionError = undefined
+      await model.doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "two" }] }],
+      })
+
+      expect(defaultCredentialConstructions).toBe(2)
+    })
+
+    test("reuses initialized credential after transient token failure", async () => {
+      const fetchBase = async () => mkChatOkResponse("gpt-4.1")
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {},
+        fetch: fetchFn,
+        quota: { retry: { maxAttempts: 1 } },
+      })
+      const model = provider.languageModel("gpt-4.1")
+      transientDefaultCredentialError = new Error("transient token failure")
+
+      await expect(
+        model.doGenerate({
+          prompt: [{ role: "user", content: [{ type: "text", text: "one" }] }],
+        }),
+      ).rejects.toThrow("transient token failure")
+      await model.doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "two" }] }],
+      })
+
+      expect(defaultCredentialConstructions).toBe(1)
+      expect(defaultCredentialCalls).toHaveLength(2)
+    })
+
+    test("one aborted token waiter does not cancel another request", async () => {
+      deferDefaultCredentialTokens = true
+      let fetchCalls = 0
+      const fetchBase = async () => {
+        fetchCalls += 1
+        return mkChatOkResponse("gpt-4.1")
+      }
+      const fetchFn = Object.assign(fetchBase, { preconnect: fetch.preconnect }) as typeof fetch
+      const provider = createAzureFoundryProvider({
+        endpoint:
+          "https://foo.cognitiveservices.azure.com/openai/chat/completions?api-version=preview",
+        entraId: {},
+        fetch: fetchFn,
+        quota: { retry: { maxAttempts: 1 } },
+      })
+      const model = provider.languageModel("gpt-4.1")
+      const firstController = new AbortController()
+      const secondController = new AbortController()
+      const prompt = [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }]
+      const first = model.doGenerate({ prompt, abortSignal: firstController.signal })
+      const second = model.doGenerate({ prompt, abortSignal: secondController.signal })
+
+      for (
+        let attempt = 0;
+        attempt < 20 && defaultCredentialTokenResolvers.length < 2;
+        attempt += 1
+      ) {
+        await Bun.sleep(0)
+      }
+      expect(defaultCredentialTokenResolvers).toHaveLength(2)
+      firstController.abort("first-caller-stop")
+      await expect(first).rejects.toBe("first-caller-stop")
+      defaultCredentialTokenResolvers[1]?.({ token: "second-caller-token" })
+      await second
+
+      expect(defaultCredentialConstructions).toBe(1)
+      expect(fetchCalls).toBe(1)
+    })
+
     test("implicit Entra fallback is used when no apiKey and no AZURE_API_KEY are configured", async () => {
       const prevKey = process.env["AZURE_API_KEY"]
       delete process.env["AZURE_API_KEY"]
@@ -2333,6 +2662,7 @@ describe("createAzureFoundryProvider", () => {
 
         const req = calls[0]!
         expect(req.headers.get("api-key")).toBe("configured-key")
+        expect(defaultCredentialConstructions).toBe(0)
       } finally {
         if (prevKey !== undefined) process.env["AZURE_API_KEY"] = prevKey
       }
@@ -2362,6 +2692,7 @@ describe("createAzureFoundryProvider", () => {
 
         const req = calls[0]!
         expect(req.headers.get("api-key")).toBe("env-key")
+        expect(defaultCredentialConstructions).toBe(0)
       } finally {
         if (prevKey !== undefined) process.env["AZURE_API_KEY"] = prevKey
         else delete process.env["AZURE_API_KEY"]

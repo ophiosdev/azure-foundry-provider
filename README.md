@@ -340,7 +340,9 @@ type AzureFoundryOptions = {
   - `"off"`: strips tools and enforces `toolChoice: { type: "none" }`.
   - `"on"`: if tools exist and tool choice is not fixed, forces `toolChoice: { type: "required" }`.
 - `timeout`:
-  - `number`: request timeout in milliseconds.
+  - `number`: per-attempt timeout in milliseconds. Starts after quota admission and covers authentication, fetch, and response-body consumption.
+  - Quota queue waits and retry backoff do not consume the timeout budget.
+  - If timeout occurs after response headers, reading the response body fails; the provider does not replay an exposed response.
   - `false`: explicitly disables timeout.
   - `undefined`: no timeout wrapper.
 - `quota`:
@@ -544,6 +546,8 @@ Explicit auth headers (step 1) always win and skip all provider-managed auth. On
 
 When no auth source reaches the provider (no explicit headers, no `bearerToken`, no `bearerTokenProvider`, no `entraId`, no `apiKey`, and no `AZURE_API_KEY`), the provider automatically attempts Microsoft Entra ID authentication with `DefaultAzureCredential()`. This makes endpoint-only configs work without requiring any credential setup in OpenCode JSON.
 
+The provider lazily creates one default credential per provider instance and calls `getToken()` for each request. Azure Identity owns token caching and refresh.
+
 ### Auth option details
 
 - `bearerToken`:
@@ -584,6 +588,8 @@ When sanitization is active, the provider removes assistant fields that break st
 - `reasoning`
 
 In `auto` mode, provider retries once with sanitized assistant fields after `400` schema-like rejections for reasoning fields and then remembers this path for that model in-process.
+Remembered strict behavior applies only while the effective policy is `auto`; explicit global or per-model `never` remains unsanitized.
+The error probe scans at most 64 KiB and stops after one second. Oversized or stalled error bodies do not trigger a sanitization retry.
 
 ### Why this exists
 
@@ -701,6 +707,8 @@ Retry defaults (used unless overridden):
 - `honorRetryAfter: true`
 - `cooldownOn429Ms: 10000`
 
+Retry options are normalized to finite values. `maxAttempts` is clamped to `1..10`; delay and cooldown settings are clamped to at most `300000` ms; `jitterRatio` is clamped to `0..1`. Non-finite values use their documented defaults. A valid server `Retry-After` can extend a wait beyond configured fallback delays. Long server delays are honored with timer-safe chunks instead of being shortened to the platform timer limit.
+
 Adaptive defaults (used unless overridden):
 
 - `enabled: true`
@@ -715,6 +723,7 @@ Static limits (`default` and `models`) are opt-in only.
 - Queues requests when any configured limit would be exceeded.
 - Supports per-model overrides by model id string in request body.
 - Applies output token clamping via `maxOutputTokensCap`.
+- Estimates TPM from Chat messages or Responses `input` text, instructions, and textual tool arguments/results. Images and file payloads are excluded; estimate is heuristic, not Azure tokenization.
 - Retries retryable statuses (`429`, `408`, `500`, `502`, `503`, `504`) with bounded backoff.
 - Honors `Retry-After` on `429` when enabled.
 - Uses adaptive cooldown from headers when near/at budget floor:
@@ -835,6 +844,8 @@ Release path (simplified):
 1. Decrement `active` count.
 2. Pop the next waiter from the FIFO queue.
 3. Signal exactly one waiter to continue.
+
+With `maxConcurrent`, the slot remains held while caller consumes the response body. Completion, cancellation, or stream failure releases the slot.
 
 This preserves deterministic queueing behavior while avoiding broadcast wakeups.
 
@@ -1206,6 +1217,8 @@ const provider = createAzureFoundryProvider({
 ```
 
 ### 10) Custom timeout behavior
+
+Numeric timeout covers one admitted attempt, including authentication and streamed response-body reads. Queue wait and retry backoff remain outside the budget. When a stream times out after headers, that stream fails and is not replayed.
 
 ```ts
 // 45s timeout

@@ -8,7 +8,6 @@ import type { ApiMode } from "./url"
 import { sanitizeBody, shouldRetryWithSanitizedBody } from "./quota-sanitize"
 import {
   clampPositive,
-  cloneJsonRecord,
   estimateRequestedTokens,
   getRpmWaitMs,
   isRetryableStatus,
@@ -18,6 +17,7 @@ import {
   parseRetryAfterMs,
   stringifyBody,
 } from "./quota-utils"
+import { AuthenticationFailure, requestSignal, wrapResponseBody } from "./provider-runtime"
 
 export type QuotaRule = {
   rpm?: number
@@ -151,13 +151,31 @@ const DEFAULT_ADAPTIVE: ResolvedAdaptive = {
   lowCooldownMs: 250,
 }
 
-function abortError(): Error {
-  return new DOMException("The operation was aborted", "AbortError")
+const MAX_RETRY_ATTEMPTS = 10
+const MAX_RETRY_DELAY_MS = 300_000
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback
+  return Math.max(min, Math.min(max, Math.floor(value)))
+}
+
+function boundedRatio(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback
+  return Math.max(0, Math.min(1, value))
 }
 
 function waitMs(delay: number, signal?: AbortSignal | null): Promise<void> {
+  if (signal?.aborted) {
+    // Preserve arbitrary caller-supplied AbortSignal reasons.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    return Promise.reject(signal.reason)
+  }
   if (delay <= 0) return Promise.resolve()
-  if (signal?.aborted) return Promise.reject(abortError())
 
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -168,7 +186,9 @@ function waitMs(delay: number, signal?: AbortSignal | null): Promise<void> {
     const onAbort = () => {
       clearTimeout(timer)
       signal?.removeEventListener("abort", onAbort)
-      reject(abortError())
+      // Preserve arbitrary caller-supplied AbortSignal reasons.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      reject(signal?.reason)
     }
 
     signal?.addEventListener("abort", onAbort, { once: true })
@@ -236,18 +256,21 @@ class QuotaGovernor {
     return mergeRule(base, specific)
   }
 
+  hasConcurrentLimit(modelId: string | undefined): boolean {
+    return clampPositive(this.resolveRule(modelId).maxConcurrent) !== undefined
+  }
+
+  hasTokenLimit(modelId: string | undefined): boolean {
+    return clampPositive(this.resolveRule(modelId).tpm) !== undefined
+  }
+
   resolveSanitizationPolicy(modelId: string | undefined): AssistantReasoningSanitizationPolicy {
     const perModel = modelId
       ? this.options?.modelOptions?.[modelId]?.assistantReasoningSanitization
       : undefined
-    if (perModel) return perModel
-
-    if (modelId && this.sanitizeAlways.has(modelId)) return "always"
-
-    const global = this.options?.assistantReasoningSanitization
-    if (global) return global
-
-    return "auto"
+    const configured = perModel ?? this.options?.assistantReasoningSanitization ?? ("auto" as const)
+    if (configured === "auto" && modelId && this.sanitizeAlways.has(modelId)) return "always"
+    return configured
   }
 
   rememberSanitizeAlways(modelId: string | undefined): void {
@@ -357,6 +380,8 @@ class QuotaGovernor {
     estimatedTokens: number,
     signal?: AbortSignal,
   ): Promise<() => void> {
+    if (signal?.aborted) throw signal.reason
+
     const resolvedModel = modelId ?? "__default__"
     const rule = this.resolveRule(modelId)
     const hasLimits = hasAnyLimit(rule)
@@ -372,6 +397,7 @@ class QuotaGovernor {
       if (modelCooldown > now) {
         await this.runtime.wait(modelCooldown - now, signal)
       }
+      if (signal?.aborted) throw signal.reason
       return () => {}
     }
 
@@ -381,13 +407,17 @@ class QuotaGovernor {
     const enforceTpm = tpm !== undefined && estimatedTokens <= tpm
 
     const window = this.getWindow(resolvedModel, now)
+    let wokeFromConcurrentWait = false
 
     while (true) {
       const now = this.runtime.now()
       window.lastSeen = now
 
       if (signal?.aborted) {
-        throw abortError()
+        if (wokeFromConcurrentWait) {
+          window.waiters.shift()?.()
+        }
+        throw signal.reason
       }
 
       const modelCooldown =
@@ -406,6 +436,7 @@ class QuotaGovernor {
       if (maxConcurrent !== undefined && window.active >= maxConcurrent) {
         await new Promise<void>((resolve, reject) => {
           const onWake = () => {
+            wokeFromConcurrentWait = true
             signal?.removeEventListener("abort", onAbort)
             resolve()
           }
@@ -413,7 +444,9 @@ class QuotaGovernor {
             const idx = window.waiters.indexOf(onWake)
             if (idx >= 0) window.waiters.splice(idx, 1)
             signal?.removeEventListener("abort", onAbort)
-            reject(abortError())
+            // Preserve arbitrary caller-supplied AbortSignal reasons.
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+            reject(signal?.reason)
           }
 
           window.waiters.push(onWake)
@@ -425,6 +458,7 @@ class QuotaGovernor {
         })
         continue
       }
+      wokeFromConcurrentWait = false
 
       if (rpm !== undefined) {
         waitFor = Math.max(
@@ -573,26 +607,31 @@ class QuotaGovernor {
 
   getRetryOptions(): ResolvedRetry {
     return {
-      maxAttempts: Math.max(
+      maxAttempts: boundedInteger(
+        this.options?.quota?.retry?.maxAttempts,
+        DEFAULT_RETRY.maxAttempts,
         1,
-        Math.floor(this.options?.quota?.retry?.maxAttempts ?? DEFAULT_RETRY.maxAttempts),
+        MAX_RETRY_ATTEMPTS,
       ),
-      baseDelayMs: Math.max(
+      baseDelayMs: boundedInteger(
+        this.options?.quota?.retry?.baseDelayMs,
+        DEFAULT_RETRY.baseDelayMs,
         1,
-        Math.floor(this.options?.quota?.retry?.baseDelayMs ?? DEFAULT_RETRY.baseDelayMs),
+        MAX_RETRY_DELAY_MS,
       ),
-      maxDelayMs: Math.max(
+      maxDelayMs: boundedInteger(
+        this.options?.quota?.retry?.maxDelayMs,
+        DEFAULT_RETRY.maxDelayMs,
         1,
-        Math.floor(this.options?.quota?.retry?.maxDelayMs ?? DEFAULT_RETRY.maxDelayMs),
+        MAX_RETRY_DELAY_MS,
       ),
-      jitterRatio: Math.max(
-        0,
-        this.options?.quota?.retry?.jitterRatio ?? DEFAULT_RETRY.jitterRatio,
-      ),
+      jitterRatio: boundedRatio(this.options?.quota?.retry?.jitterRatio, DEFAULT_RETRY.jitterRatio),
       honorRetryAfter: this.options?.quota?.retry?.honorRetryAfter ?? DEFAULT_RETRY.honorRetryAfter,
-      cooldownOn429Ms: Math.max(
+      cooldownOn429Ms: boundedInteger(
+        this.options?.quota?.retry?.cooldownOn429Ms,
+        DEFAULT_RETRY.cooldownOn429Ms,
         0,
-        Math.floor(this.options?.quota?.retry?.cooldownOn429Ms ?? DEFAULT_RETRY.cooldownOn429Ms),
+        MAX_RETRY_DELAY_MS,
       ),
     }
   }
@@ -602,15 +641,16 @@ class QuotaGovernor {
     const cap = clampPositive(this.resolveRule(modelId).maxOutputTokensCap)
     if (cap === undefined) return body
 
-    const next = { ...body }
-
+    let next: Record<string, unknown> | undefined
     for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"] as const) {
-      if (typeof next[key] === "number" && next[key] > cap) {
+      const value = body[key]
+      if (typeof value === "number" && value > cap) {
+        next ??= { ...body }
         next[key] = cap
       }
     }
 
-    return next
+    return next ?? body
   }
 }
 
@@ -625,6 +665,9 @@ export function wrapFetchWithQuota(
   })
 
   const wrapped = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const callerSignal = requestSignal(input, init)
+    if (callerSignal?.aborted) throw callerSignal.reason
+
     const retry = governor.getRetryOptions()
     let attempt = 0
     let autoFallbackTried = false
@@ -636,12 +679,17 @@ export function wrapFetchWithQuota(
         ? parsedOriginal["model"]
         : undefined
 
-    let transformedBody: string | undefined
-    let transformedParsed: Record<string, unknown> | undefined
+    let transformedRequest:
+      | {
+          body: string
+          parsed: Record<string, unknown>
+          modelId: string | undefined
+          estimatedTokens?: number
+        }
+      | undefined
 
     const invalidateTransformedCache = (): void => {
-      transformedBody = undefined
-      transformedParsed = undefined
+      transformedRequest = undefined
     }
 
     const getTransformed = (): {
@@ -655,25 +703,37 @@ export function wrapFetchWithQuota(
           body: originalBody,
           parsed: undefined,
           modelId: undefined,
-          estimatedTokens: 512,
+          estimatedTokens: governor.hasTokenLimit(undefined) ? 512 : 0,
         }
       }
 
-      if (transformedBody === undefined || transformedParsed === undefined) {
+      if (!transformedRequest) {
         const shouldSanitize = governor.resolveSanitizationPolicy(modelIdFromOriginal) === "always"
-        let nextParsed = governor.clampMaxOutput(cloneJsonRecord(parsedOriginal))
+        let nextParsed = governor.clampMaxOutput(parsedOriginal)
         if (shouldSanitize) {
           nextParsed = sanitizeBody(nextParsed)
         }
-        transformedParsed = nextParsed
-        transformedBody = stringifyBody(nextParsed)
+        transformedRequest = {
+          body:
+            nextParsed === parsedOriginal && typeof originalBody === "string"
+              ? originalBody
+              : stringifyBody(nextParsed),
+          parsed: nextParsed,
+          modelId: modelIdFromOriginal,
+        }
       }
 
+      const estimatedTokens = governor.hasTokenLimit(transformedRequest.modelId)
+        ? (transformedRequest.estimatedTokens ??= estimateRequestedTokens(
+            transformedRequest.parsed,
+          ))
+        : 0
+
       return {
-        body: transformedBody,
-        parsed: transformedParsed,
-        modelId: modelIdFromOriginal,
-        estimatedTokens: estimateRequestedTokens(transformedParsed),
+        body: transformedRequest.body,
+        parsed: transformedRequest.parsed,
+        modelId: transformedRequest.modelId,
+        estimatedTokens,
       }
     }
 
@@ -682,6 +742,7 @@ export function wrapFetchWithQuota(
 
       const transformed = getTransformed()
       const modelId = transformed.modelId
+      const holdConcurrency = governor.hasConcurrentLimit(modelId)
       const sanitization = governor.resolveSanitizationPolicy(modelId)
       const shouldSanitize = sanitization === "always"
       let nextInit = baseInit ? { ...baseInit } : undefined
@@ -692,35 +753,69 @@ export function wrapFetchWithQuota(
         }
       }
 
-      const release = await governor.acquire(
-        modelId,
-        transformed.estimatedTokens,
-        nextInit?.signal ?? undefined,
-      )
+      const release = await governor.acquire(modelId, transformed.estimatedTokens, callerSignal)
+
+      let released = false
+      const releaseOnce = () => {
+        if (released) return
+        released = true
+        release()
+      }
 
       let response: Response
       try {
         response = await fetchFn(input, nextInit)
       } catch (error) {
-        release()
+        releaseOnce()
 
+        if (callerSignal?.aborted) throw callerSignal.reason
+        if (error instanceof AuthenticationFailure) throw error.original
         if (attempt >= retry.maxAttempts || isAbortLikeError(error)) {
           throw error
         }
 
         const base = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 1))
-        const delay = jitterDelay(base, retry.jitterRatio)
-        await waitMs(delay, nextInit?.signal)
+        const delay = Math.min(retry.maxDelayMs, jitterDelay(base, retry.jitterRatio))
+        await waitMs(delay, callerSignal)
         continue
       }
 
-      release()
+      const retryableStatus = isRetryableStatus(response.status)
+      const probeSanitization =
+        !shouldSanitize && sanitization === "auto" && !autoFallbackTried && response.status === 400
+      const retryStatus = retryableStatus && attempt < retry.maxAttempts
+      if (holdConcurrency || probeSanitization || retryStatus) {
+        try {
+          response = wrapResponseBody(
+            response,
+            holdConcurrency && !probeSanitization ? releaseOnce : () => {},
+          )
+        } catch (error) {
+          releaseOnce()
+          void response.body?.cancel().catch(() => {})
+          throw error
+        }
+      }
+      if (!holdConcurrency) releaseOnce()
 
-      governor.applyRateLimitHeaders(response, modelId)
+      try {
+        governor.applyRateLimitHeaders(response, modelId)
+      } catch (error) {
+        await discardResponse(response)
+        releaseOnce()
+        throw error
+      }
 
       if (!shouldSanitize && sanitization === "auto" && !autoFallbackTried) {
-        const shouldFallback = await shouldRetryWithSanitizedBody(response)
+        const shouldFallback = await shouldRetryWithSanitizedBody(response, callerSignal)
+        if (callerSignal?.aborted) {
+          await discardResponse(response)
+          releaseOnce()
+          throw callerSignal.reason
+        }
         if (shouldFallback) {
+          await discardResponse(response)
+          releaseOnce()
           governor.rememberSanitizeAlways(modelId)
           invalidateTransformedCache()
           options?.onSanitizedRetry?.({
@@ -735,9 +830,18 @@ export function wrapFetchWithQuota(
           attempt -= 1
           continue
         }
+        if (holdConcurrency && probeSanitization) {
+          try {
+            response = wrapResponseBody(response, releaseOnce)
+          } catch (error) {
+            releaseOnce()
+            void response.body?.cancel().catch(() => {})
+            throw error
+          }
+        }
       }
 
-      if (!isRetryableStatus(response.status) || attempt >= retry.maxAttempts) {
+      if (!retryableStatus || attempt >= retry.maxAttempts) {
         return response
       }
 
@@ -748,6 +852,7 @@ export function wrapFetchWithQuota(
         const fallback = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 1))
         const cooldown = Math.max(retry.cooldownOn429Ms, retryAfterMs ?? 0)
         governor.setCooldown(cooldown, modelId)
+        await discardResponse(response)
         options?.onRetry?.({
           eventVersion: "v1",
           phase: "retry",
@@ -758,8 +863,11 @@ export function wrapFetchWithQuota(
           ...(modelId ? { modelId } : {}),
         })
         await waitMs(
-          Math.max(retryAfterMs ?? 0, jitterDelay(fallback, retry.jitterRatio)),
-          nextInit?.signal,
+          Math.max(
+            retryAfterMs ?? 0,
+            Math.min(retry.maxDelayMs, jitterDelay(fallback, retry.jitterRatio)),
+          ),
+          callerSignal,
         )
         continue
       }
@@ -768,6 +876,7 @@ export function wrapFetchWithQuota(
         Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 1)),
         retry.jitterRatio,
       )
+      await discardResponse(response)
       options?.onRetry?.({
         eventVersion: "v1",
         phase: "retry",
@@ -776,15 +885,23 @@ export function wrapFetchWithQuota(
         status: response.status,
         ...(modelId ? { modelId } : {}),
       })
-      await waitMs(delay, nextInit?.signal)
+      await waitMs(Math.min(retry.maxDelayMs, delay), callerSignal)
     }
 
-    return fetchFn(input, init)
+    throw new Error("Retry loop exited unexpectedly")
   }
 
   return Object.assign(wrapped, {
     preconnect: fetchFn.preconnect,
   })
+}
+
+async function discardResponse(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // Discarded response bodies must not block retries.
+  }
 }
 
 export const __test = {

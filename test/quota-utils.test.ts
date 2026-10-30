@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { getTpmWaitMs, jitterDelay, readTextLength } from "../src/quota-utils"
+import { jitterDelay, readTextLength } from "../src/quota-utils"
 
 describe("quota-utils readTextLength", () => {
   test("returns 0 for non-array non-string content", () => {
@@ -44,49 +44,5 @@ describe("quota-utils jitterDelay", () => {
     } finally {
       Math.random = originalRandom
     }
-  })
-})
-
-describe("quota-utils getTpmWaitMs", () => {
-  test("returns 0 when total would stay within TPM", () => {
-    const wait = getTpmWaitMs(
-      100,
-      [
-        { at: 0, tokens: 3 },
-        { at: 10, tokens: 2 },
-      ],
-      20,
-      10,
-      4,
-    )
-
-    expect(wait).toBe(0)
-  })
-
-  test("returns wait based on the event that releases enough tokens", () => {
-    const wait = getTpmWaitMs(
-      100,
-      [
-        { at: 0, tokens: 6 },
-        { at: 10, tokens: 5 },
-      ],
-      20,
-      10,
-      3,
-    )
-
-    expect(wait).toBe(80)
-  })
-
-  test("falls back to full window when tokens still would not fit", () => {
-    const wait = getTpmWaitMs(100, [{ at: 0, tokens: 2 }], 20, 1, 5)
-
-    expect(wait).toBe(100)
-  })
-
-  test("wait is clamped to at least 1 when release boundary is already current", () => {
-    const wait = getTpmWaitMs(100, [{ at: 0, tokens: 6 }], 100, 5, 1)
-
-    expect(wait).toBe(1)
   })
 })

@@ -788,8 +788,9 @@ describe("quota internals", () => {
     )
 
     const release1 = await governor.acquire("m", 6)
+    expect(waits).toEqual([])
     const release2 = await governor.acquire("m", 6)
-    expect(waits.length).toBeGreaterThanOrEqual(1)
+    expect(waits).toEqual([50, 1])
 
     const before = waits.length
     const release3 = await governor.acquire("m", 20)
@@ -834,6 +835,7 @@ describe("quota internals", () => {
   })
 
   test("adaptive options and header application branches", () => {
+    const events: unknown[] = []
     const governor = __test.createGovernor({
       quota: {
         adaptive: {
@@ -843,6 +845,7 @@ describe("quota internals", () => {
           lowWatermarkRatio: 0.1,
         },
       },
+      onAdaptiveCooldown: (event) => events.push(event),
     })
 
     const adaptive = governor.getAdaptiveOptions()
@@ -881,6 +884,31 @@ describe("quota internals", () => {
         },
       }),
     )
+
+    expect(events).toEqual([
+      {
+        eventVersion: "v1",
+        phase: "adaptive_cooldown",
+        cooldownMs: 7,
+        reason: "low_watermark",
+        remainingRequests: 1,
+        remainingTokens: 2000,
+      },
+      {
+        eventVersion: "v1",
+        phase: "adaptive_cooldown",
+        cooldownMs: 60_000,
+        reason: "requests_depleted",
+        remainingRequests: 0,
+      },
+      {
+        eventVersion: "v1",
+        phase: "adaptive_cooldown",
+        cooldownMs: 60_000,
+        reason: "tokens_depleted",
+        remainingTokens: 0,
+      },
+    ])
   })
 
   test("adaptive hard cooldown precedence for zero remaining requests", async () => {

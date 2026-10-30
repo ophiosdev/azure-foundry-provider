@@ -1716,6 +1716,41 @@ describe("createAzureFoundryProvider", () => {
     expect(body2.max_tokens).toBe(256)
   })
 
+  test("quota clamps max_output_tokens for Responses", async () => {
+    const calls: Array<Request> = []
+    const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(new Request(input, init))
+      return mkResponsesOkResponse()
+    }
+    const fetchFn = Object.assign(fetchBase, {
+      preconnect: fetch.preconnect,
+    }) as typeof fetch
+
+    const provider = createAzureFoundryProvider({
+      endpoint: "https://foo.openai.azure.com/openai/v1/responses",
+      apiKey: "k",
+      fetch: fetchFn,
+      quota: {
+        default: {
+          maxOutputTokensCap: 256,
+        },
+        retry: {
+          maxAttempts: 1,
+        },
+      },
+    })
+
+    await provider.responses("gpt-5.3-codex").doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      maxOutputTokens: 4096,
+    })
+
+    const req = calls[0]
+    if (!req) throw new Error("missing request")
+    const body = await req.clone().json()
+    expect(body.max_output_tokens).toBe(256)
+  })
+
   test("model option can force assistant reasoning sanitization", async () => {
     const calls: Array<Request> = []
     const fetchBase = async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -91,15 +91,7 @@ type Resolved = {
   fetch: FetchFunction | undefined
   modelOptions: Record<string, ModelRequestOptions>
   headers: () => Record<string, string>
-  onFallback?: (event: {
-    eventVersion: "v1"
-    phase: "fallback"
-    fromMode: ApiMode
-    toMode: ApiMode
-    reason: string
-    status?: number
-    modelId?: string
-  }) => void
+  onFallback?: AzureFoundryOptions["onFallback"]
 }
 
 function noModel(modelType: "embeddingModel" | "imageModel", modelId: string): never {
@@ -232,39 +224,31 @@ function resolve(options: AzureFoundryOptions): Resolved {
   let resolvedFetch = wrapFetchWithQuota(timeoutFetch ?? globalThis.fetch, policy)
   resolvedFetch = wrapFetchWithAuth(resolvedFetch, options)
   const name = options.name ?? "azure-foundry"
+  const userAgentSuffix = `azure-foundry-provider/${VERSION}`
 
   const headers = () => {
     const explicit = options.headers ?? {}
     const useExplicitAuth = hasAuthHeader(explicit)
-    if (useExplicitAuth) {
-      return withUserAgentSuffix(explicit, `azure-foundry-provider/${VERSION}`)
-    }
+    let resolved = explicit
 
-    if (options.bearerToken) {
-      return withUserAgentSuffix(
-        { Authorization: `Bearer ${options.bearerToken}`, ...explicit },
-        `azure-foundry-provider/${VERSION}`,
-      )
-    }
-
-    if (options.bearerTokenProvider || options.entraId) {
-      return withUserAgentSuffix(explicit, `azure-foundry-provider/${VERSION}`)
-    }
-
-    if (options.apiKey || process.env["AZURE_API_KEY"]) {
+    if (!useExplicitAuth && options.bearerToken) {
+      resolved = { Authorization: `Bearer ${options.bearerToken}`, ...explicit }
+    } else if (
+      !useExplicitAuth &&
+      !options.bearerTokenProvider &&
+      !options.entraId &&
+      (options.apiKey || process.env["AZURE_API_KEY"])
+    ) {
       const apiKey = loadApiKey({
         apiKey: options.apiKey,
         environmentVariableName: "AZURE_API_KEY",
         apiKeyParameterName: "apiKey",
         description: "Azure Foundry",
       })
-      return withUserAgentSuffix(
-        { "api-key": apiKey, ...explicit },
-        `azure-foundry-provider/${VERSION}`,
-      )
+      resolved = { "api-key": apiKey, ...explicit }
     }
 
-    return withUserAgentSuffix(explicit, `azure-foundry-provider/${VERSION}`)
+    return withUserAgentSuffix(resolved, userAgentSuffix)
   }
 
   return {

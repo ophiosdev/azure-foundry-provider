@@ -413,6 +413,46 @@ describe("createAzureFoundryProvider", () => {
     expect(calls[0]!.url).toBe("https://foo.openai.azure.com/openai/v1/responses")
   })
 
+  const gatewayEndpoint =
+    "https://aigw01-jzklms377ve2g.eastus2-01.ai.gateway.azure.com/default/models/openai/v1?route=prod&trace=1"
+  const gatewayModeCases = [
+    {
+      mode: "chat" as const,
+      operationSuffix: "/chat/completions",
+      response: mkChatOkResponse("gateway-model"),
+    },
+    {
+      mode: "responses" as const,
+      operationSuffix: "/responses",
+      response: mkResponsesOkResponse("gateway-model"),
+    },
+  ]
+
+  for (const scenario of gatewayModeCases) {
+    test(`routes ${scenario.mode} requests through an Azure AI gateway v1 base URL`, async () => {
+      const { calls, fetchFn } = mkFetchSequence([scenario.response])
+      const provider = createAzureFoundryProvider({
+        endpoint: gatewayEndpoint,
+        apiMode: scenario.mode,
+        apiKey: "k",
+        fetch: fetchFn,
+      })
+
+      await provider.languageModel("gateway-model").doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+        maxOutputTokens: 32,
+      })
+
+      expect(calls).toHaveLength(1)
+      const request = calls[0]!
+      expect(request.url).toBe(
+        `https://aigw01-jzklms377ve2g.eastus2-01.ai.gateway.azure.com/default/models/openai/v1${scenario.operationSuffix}?route=prod&trace=1`,
+      )
+      const body = (await request.json()) as Record<string, unknown>
+      expect(body).toHaveProperty("model", "gateway-model")
+    })
+  }
+
   test("v1 base endpoint without apiMode throws actionable error", () => {
     const provider = createAzureFoundryProvider({
       endpoint: "https://foo.openai.azure.com/openai/v1",

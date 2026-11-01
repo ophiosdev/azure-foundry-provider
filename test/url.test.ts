@@ -91,6 +91,26 @@ describe("parseEndpoint", () => {
     expect(parsed.requestURL).toBe("https://foo.openai.azure.com/openai/v1/responses")
   })
 
+  const gatewayEndpoint =
+    "https://aigw01-jzklms377ve2g.eastus2-01.ai.gateway.azure.com/default/models/openai/v1?route=prod&trace=1"
+
+  for (const [mode, operationSuffix] of [
+    ["chat", "/chat/completions"],
+    ["responses", "/responses"],
+  ] as const) {
+    test(`parses Azure AI gateway v1 base endpoint in ${mode} mode`, () => {
+      const parsed = parseEndpoint(gatewayEndpoint, mode)
+
+      expect(parsed.hostType).toBe("ai-gateway")
+      expect(parsed.pathType).toBe("v1-base")
+      expect(parsed.mode).toBe(mode)
+      expect(parsed.operationPath).toBe(`/default/models/openai/v1${operationSuffix}`)
+      expect(parsed.requestURL).toBe(
+        `https://aigw01-jzklms377ve2g.eastus2-01.ai.gateway.azure.com/default/models/openai/v1${operationSuffix}?route=prod&trace=1`,
+      )
+    })
+  }
+
   test("v1 base endpoint requires apiMode", () => {
     expect(() => parseEndpoint("https://foo.openai.azure.com/openai/v1")).toThrow(
       "Endpoint path /openai/v1 requires apiMode",

@@ -5,7 +5,7 @@
 
 export type ApiMode = "chat" | "responses"
 
-export type HostType = "openai-azure" | "cognitive-services" | "foundry-services"
+export type HostType = "openai-azure" | "cognitive-services" | "foundry-services" | "ai-gateway"
 
 export type PathType =
   | "chat-completions"
@@ -37,6 +37,7 @@ function parseHostType(hostname: string): HostType {
   if (hostname.endsWith(".openai.azure.com")) return "openai-azure"
   if (hostname.endsWith(".cognitiveservices.azure.com")) return "cognitive-services"
   if (hostname.endsWith(".services.ai.azure.com")) return "foundry-services"
+  if (hostname.endsWith(".ai.gateway.azure.com")) return "ai-gateway"
   throw new Error(`Unsupported Azure hostname: ${hostname}. ${HELP}`)
 }
 
